@@ -1,0 +1,34 @@
+name: UBYS Bot Daily Run
+
+on:
+  schedule:
+    - cron: '0 6,10,14,18 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu Çek
+        uses: actions/checkout@v3
+
+      - name: Python Kur
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Kütüphaneleri Yükle
+        run: |
+          pip install -r requirements.txt
+
+      - name: Botu Çalıştır
+        env:
+          OGRENCI_NO: ${{ secrets.OGRENCI_NO }}
+          SIFRE: ${{ secrets.SIFRE }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          BOLUM_TIPI: ${{ secrets.BOLUM_TIPI }}
+        run: python main.py
