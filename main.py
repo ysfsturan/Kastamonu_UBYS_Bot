@@ -62,6 +62,7 @@ def akademik_takvim_sayaci(driver):
         driver.get(TAKVIM_URL)
         wait = WebDriverWait(driver, 20)
         
+        # Fakülte seçimi kısmı
         if BOLUM_TIPI != "GENEL":
             fakulte = "Tıp Fakültesi" if BOLUM_TIPI == "TIP" else "Veteriner" if BOLUM_TIPI == "VET" else ""
             if fakulte:
@@ -71,62 +72,69 @@ def akademik_takvim_sayaci(driver):
                     time.sleep(3)
                 except: pass
 
+        # Sayfayı aşağı kaydırarak içeriğin yüklenmesini sağla
         last_height = driver.execute_script("return document.body.scrollHeight")
         for i in range(0, last_height, 700):
             driver.execute_script(f"window.scrollTo(0, {i});")
             time.sleep(0.2)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-
+        
         soup = BeautifulSoup(driver.page_source, "html.parser")
         metinler = [s.strip() for s in soup.get_text(separator="\n").split("\n") if len(s.strip()) > 1]
         
         bugun = datetime.now()
         mesaj_listesi = []
         eklenenler = set()
-        tarih_regex = re.compile(r'(\d{1,2})\s+([a-zA-ZğüşıöçĞÜŞİÖÇ]+)\s+(\d{4})')
+        
+        # GÜNCELLENEN REGEX: Tarih aralıklarını (30 Mart - 05 Nisan 2026 gibi) yakalar
+        tarih_regex = re.compile(r'(\d{1,2})\s+([a-zA-ZğüşıöçĞÜŞİÖÇ]+)(?:\s*-\s*\d{1,2}\s*[a-zA-ZğüşıöçĞÜŞİÖÇ]*)?\s+(\d{4})')
         
         gereksiz_kelimeler = ["Senato", "Yönetim Kurulu", "Akademik Kurul", "Anabilim Dalı", "Danışma Kurulu"]
-        if BOLUM_TIPI == "GENEL": gereksiz_kelimeler.append("Ders Kurulu")
 
         for i, satir in enumerate(metinler):
             if "Tarih:" in satir:
                 try:
-                    if i > 0: etkinlik_adi = metinler[i-1].strip()
-                    else: continue
+                    # Etkinlik adı bazen 1 satır bazen 2 satır üstte olabilir, o yüzden i-1 ve i-2'yi kontrol et
+                    etkinlik_adi = metinler[i-1].strip()
+                    if "Tarih:" in etkinlik_adi or len(etkinlik_adi) < 3:
+                        etkinlik_adi = metinler[i-2].strip()
 
                     if any(g in etkinlik_adi for g in gereksiz_kelimeler): continue
 
-                    if i + 1 < len(metinler):
-                        tarih_satiri = metinler[i+1].strip()
-                        match = tarih_regex.search(tarih_satiri)
-                        if match:
-                            gun, ay_str, yil = match.groups()
-                            ay_num = 0
-                            for k, v in aylar.items():
-                                if k in ay_str: ay_num = v; break
-                            if ay_num == 0: continue
+                    # Altındaki 1-2 satırı tarih için tara
+                    tarih_bulundu = False
+                    for j in range(1, 3):
+                        if i + j < len(metinler):
+                            tarih_satiri = metinler[i+j].strip()
+                            match = tarih_regex.search(tarih_satiri)
+                            if match:
+                                gun, ay_str, yil = match.groups()
+                                ay_num = 0
+                                for k, v in aylar.items():
+                                    if k.lower() in ay_str.lower(): ay_num = v; break
+                                if ay_num == 0: continue
 
-                            tarih_obj = datetime(int(yil), ay_num, int(gun))
-                            kalan_gun = (tarih_obj - bugun).days + 1
-                            
-                            if 0 <= kalan_gun <= 45:
-                                anahtar = f"{gun}.{ay_num}.{yil}-{etkinlik_adi}"
-                                if anahtar in eklenenler: continue
-                                eklenenler.add(anahtar)
+                                tarih_obj = datetime(int(yil), ay_num, int(gun))
+                                kalan_gun = (tarih_obj - bugun).days + 1
+                                
+                                # 45 günden az kalanları listeye ekle
+                                if 0 <= kalan_gun <= 45:
+                                    anahtar = f"{gun}.{ay_num}.{yil}-{etkinlik_adi}"
+                                    if anahtar in eklenenler: continue
+                                    eklenenler.add(anahtar)
 
-                                durum = f"{kalan_gun} gün kaldı"
-                                if kalan_gun == 0: durum = "BUGÜN"
-                                
-                                ikon = "📅"
-                                k_isim = etkinlik_adi.lower()
-                                if "vize" in k_isim or "ara sınav" in k_isim: ikon = "📝 VİZE"
-                                elif "final" in k_isim or "yıl sonu" in k_isim: ikon = "🏁 FİNAL"
-                                elif "bütünleme" in k_isim: ikon = "🆘 BÜT"
-                                elif "kayıt" in k_isim: ikon = "✍️ KAYIT"
-                                elif "tatil" in k_isim or "bayram" in k_isim: ikon = "🏖️ TATİL"
-                                
-                                mesaj_listesi.append(f"{ikon} *{etkinlik_adi}*\n🗓️ {gun}.{ay_num}.{yil} ({durum})")
+                                    durum = f"{kalan_gun} gün kaldı"
+                                    if kalan_gun == 0: durum = "BUGÜN"
+                                    
+                                    ikon = "📅"
+                                    k_isim = etkinlik_adi.lower()
+                                    if "vize" in k_isim or "ara sınav" in k_isim: ikon = "📝 VİZE"
+                                    elif "final" in k_isim or "yıl sonu" in k_isim: ikon = "🏁 FİNAL"
+                                    elif "bütünleme" in k_isim: ikon = "🆘 BÜT"
+                                    elif "bayram" in k_isim or "ramazan" in k_isim: ikon = "🌙 DİNİ"
+                                    
+                                    mesaj_listesi.append(f"{ikon} *{etkinlik_adi}*\n🗓️ {gun}.{ay_num}.{yil} ({durum})")
+                                    tarih_bulundu = True
+                                    break
                 except: continue
 
         if mesaj_listesi: return "📅 *AKADEMİK TAKVİM*\n\n" + "\n\n".join(mesaj_listesi)
