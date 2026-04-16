@@ -256,7 +256,7 @@ def main():
         
         print(f"🔗 Şu anki URL: {driver.current_url}")
         
-print("📖 Dersler/Notlar sayfasına gidiliyor...")
+        print("📖 Dersler/Notlar sayfasına gidiliyor...")
         driver.get("https://ubys.kastamonu.edu.tr/AIS/Student/Class/Index")
         
         print("🔍 Sayfanın tam yüklenmesi ve İframe aranıyor...")
