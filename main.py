@@ -61,8 +61,6 @@ def akademik_takvim_sayaci(driver):
     try:
         driver.get(TAKVIM_URL)
         wait = WebDriverWait(driver, 20)
-        
-        # Fakülte seçimi kısmı
         if BOLUM_TIPI != "GENEL":
             fakulte = "Tıp Fakültesi" if BOLUM_TIPI == "TIP" else "Veteriner" if BOLUM_TIPI == "VET" else ""
             if fakulte:
@@ -71,8 +69,6 @@ def akademik_takvim_sayaci(driver):
                     driver.execute_script("arguments[0].click();", btn)
                     time.sleep(3)
                 except: pass
-
-        # Sayfayı aşağı kaydırarak içeriğin yüklenmesini sağla
         last_height = driver.execute_script("return document.body.scrollHeight")
         for i in range(0, last_height, 700):
             driver.execute_script(f"window.scrollTo(0, {i});")
@@ -84,8 +80,6 @@ def akademik_takvim_sayaci(driver):
         bugun = datetime.now()
         mesaj_listesi = []
         eklenenler = set()
-        
-        # GÜNCELLENEN REGEX: Tarih aralıklarını (30 Mart - 05 Nisan 2026 gibi) yakalar
         tarih_regex = re.compile(r'(\d{1,2})\s+([a-zA-ZğüşıöçĞÜŞİÖÇ]+)(?:\s*-\s*\d{1,2}\s*[a-zA-ZğüşıöçĞÜŞİÖÇ]*)?\s+(\d{4})')
         
         gereksiz_kelimeler = ["Senato", "Yönetim Kurulu", "Akademik Kurul", "Anabilim Dalı", "Danışma Kurulu"]
@@ -206,21 +200,32 @@ def gist_islem(islem, veri=None):
         requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=h, json={"files": {"notlar.json": {"content": json.dumps(veri, indent=4)}}})
 
 def metni_temizle(ders, ham):
-    yasak = ["Ders", "Kredi", "AKTS", "Durum", "Başarı"]; notlar = []
-    bulunan = re.findall(r'([a-zA-Zçğıöşü0-9\s\.\-]+)\s*[:|]\s*([\d,]+)', ham)
-    vize_notu = None; final_var = False
+    yasak = ["Ders", "Kredi", "AKTS", "Durum", "Başarı"]
+    notlar = []
+    bulunan = re.findall(r'([a-zA-ZçğıöşüĞÜŞİÖÇ0-9\s\.\-\%\(\)]+)\s*[:|]\s*([\d,]+)', ham)
+    
+    vize_notu = None
+    final_var = False
+    
     for i, d in bulunan:
         if any(y in i for y in yasak) or i.lower() in ders.lower(): continue
-        ikon = "📄" if "vize" in i.lower() else "🏁" if "final" in i.lower() else "📝"
-        if "vize" in i.lower(): vize_notu = d
+        ikon = "📄" if "vize" in i.lower() or "ara" in i.lower() else "🏁" if "final" in i.lower() else "📝"
+        if "vize" in i.lower() or "ara" in i.lower(): vize_notu = d
         if "final" in i.lower(): final_var = True
-        notlar.append(f"{ikon} *{i.strip()}:* `{d}`")
+        
+        # Fazla boşlukları temizleyelim
+        temiz_isim = " ".join(i.split())
+        notlar.append(f"{ikon} *{temiz_isim}:* `{d}`")
+        
     msj = f"📚 *{ders}*\n" + " | ".join(notlar)
+    
     if vize_notu and not final_var:
         analiz = final_ihtiyac_hesapla(vize_notu)
         if analiz: msj += f"\n\n🧠 *Hedef:*\n{analiz}"
+        
     harf = re.search(r'\b(AA|BA|BB|CB|CC|DC|DD|FD|FF)\b', ham)
     if harf: msj += f"\n🔠 *Harf:* `{harf.group(1)}`"
+    
     return msj if notlar or harf else None
 
 def main():
@@ -247,13 +252,21 @@ def main():
         if ifr: driver.switch_to.frame(ifr[0])
         html = driver.page_source; driver.switch_to.default_content() if ifr else None
         if html:
-            soup = BeautifulSoup(html, "html.parser"); yeni = {}; son = "Genel"
+            soup = BeautifulSoup(html, "html.parser")
+            yeni = {}
+            son = "Genel"
+            
             for tr in soup.find_all("tr"):
                 cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"]) if c.get_text(strip=True)]
                 if not cols or "Ders Kodu" in cols[0]: continue
-                if len(cols) > 1 and len(cols[1]) > 3 and not any(c.isdigit() for c in cols[1]): son = cols[1]
-                else: yeni[son] = yeni.get(son, "") + " | " + " | ".join(cols)
-            eski = gist_islem("cek"); yano = None; gano = gano_cek(driver)
+                if len(cols) > 1 and len(cols[1]) > 3 and not cols[1].isdigit(): 
+                    son = cols[1]
+                else: 
+                    yeni[son] = yeni.get(son, "") + " | " + " | ".join(cols)
+                    
+            eski = gist_islem("cek")
+            gano = gano_cek(driver)
+            
             for d, icerik in yeni.items():
                 if icerik != eski.get(d, "") and len(icerik) > 5:
                     msj = metni_temizle(d, icerik)
