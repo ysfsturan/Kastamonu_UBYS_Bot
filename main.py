@@ -242,28 +242,55 @@ def main():
         if takvim: telegram_gonder(takvim); bulunan_bise_var_mi = True
         yemek = yemek_menusunu_getir(driver)
         if yemek: telegram_gonder(yemek); bulunan_bise_var_mi = True
-        print("🌍 UBYS..."); driver.get(UBYS_URL)
+        print("🌍 UBYS sitesine gidiliyor...")
+        driver.get(UBYS_URL)
         wait = WebDriverWait(driver, 30)
+        
+        print("🔑 Giriş bilgileri dolduruluyor...")
         wait.until(EC.element_to_be_clickable((By.XPATH, XPATH_KULLANICI_ADI))).send_keys(OGRENCI_NO)
         driver.find_element(By.XPATH, XPATH_SIFRE).send_keys(SIFRE)
         driver.find_element(By.XPATH, XPATH_GIRIS_BUTONU).click()
-        time.sleep(5); driver.get("https://ubys.kastamonu.edu.tr/AIS/Student/Class/Index"); time.sleep(5)
+        
+        print("⏳ Giriş yapıldı, ana sayfanın yüklenmesi bekleniyor...")
+        time.sleep(7) # Github actions biraz yavaş olabilir, süreyi 7 saniye yaptım.
+        
+        print(f"🔗 Şu anki URL: {driver.current_url}")
+        
+        print("📖 Dersler/Notlar sayfasına gidiliyor...")
+        driver.get("https://ubys.kastamonu.edu.tr/AIS/Student/Class/Index")
+        time.sleep(7)
+        
+        print("🔍 İframe (Tablo Çerçevesi) aranıyor...")
         ifr = driver.find_elements(By.TAG_NAME, "iframe")
-        if ifr: driver.switch_to.frame(ifr[0])
-        html = driver.page_source; driver.switch_to.default_content() if ifr else None
+        if ifr:
+            print(f"✅ {len(ifr)} adet iframe bulundu, içine giriliyor...")
+            driver.switch_to.frame(ifr[0])
+        else:
+            print("⚠️ İframe bulunamadı! Sayfada tablo yüklenmemiş olabilir.")
+
+        html = driver.page_source
+        driver.switch_to.default_content() if ifr else None
+        
         if html:
             soup = BeautifulSoup(html, "html.parser")
+            tr_listesi = soup.find_all("tr")
+            print(f"📊 Sayfada toplam {len(tr_listesi)} adet tablo satırı (tr) bulundu.")
+            
             yeni = {}
             son = "Genel"
             
-            for tr in soup.find_all("tr"):
+            for tr in tr_listesi:
                 cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"]) if c.get_text(strip=True)]
                 if not cols or "Ders Kodu" in cols[0]: continue
+                
+                # Rakam kontrolünü daha esnek hale getirdiğimiz kısım
                 if len(cols) > 1 and len(cols[1]) > 3 and not cols[1].isdigit(): 
                     son = cols[1]
                 else: 
                     yeni[son] = yeni.get(son, "") + " | " + " | ".join(cols)
-                    
+            
+            print(f"📝 Ayıklanan ders sayısı: {len(yeni)}")
+            
             eski = gist_islem("cek")
             gano = gano_cek(driver)
             
@@ -273,8 +300,14 @@ def main():
                     if msj:
                         alt = f" | 🎓 GANO: {gano}" if gano else ""
                         telegram_gonder(f"📢 *YENİ NOT!* \n\n{msj}\n{alt}")
+                        print(f"📨 {d} dersi için Telegram'a mesaj atıldı.")
                         bulunan_bise_var_mi = True
-            if yeni: gist_islem("yaz", yeni)
+            
+            if yeni: 
+                gist_islem("yaz", yeni)
+                print("💾 Gist başarıyla güncellendi.")
+            else:
+                print("❌ Okunacak geçerli bir not bulunamadı (yeni sözlüğü boş).")
     except Exception as e:
         telegram_gonder(f"❌ HATA: {str(e)}"); bulunan_bise_var_mi = True
     finally:
