@@ -257,20 +257,23 @@ def main():
         print(f"🔗 Şu anki URL: {driver.current_url}")
         
         print("📖 Dersler/Notlar sayfasına menüden tıklanarak gidiliyor...")
-        
-        # 1. Bekleme: Ana sayfa menülerinin yüklenmesi için ufak bir bekleme
         time.sleep(3)
         
         try:
             wait = WebDriverWait(driver, 20)
-            notlar_butonu_xpath = '/html/body/div[2]/div[2]/div[2]/div/div/div/div/div[2]/ul/li[1]'
             
-            print("🔍 Menü butonu aranıyor...")
-            menu_butonu = wait.until(EC.presence_of_element_located((By.XPATH, notlar_butonu_xpath)))
+            # 🎯 İŞTE SİHİRLİ DOKUNUŞ: Akıllı XPath
+            # Butonun nerede olduğuna değil, nereye yönlendirdiğine bakıyoruz!
+            akilli_xpath = "//a[contains(@href, '/AIS/Student/Class/Index')]"
             
-            # Normal click() bazen animasyonlara takılır, bu yüzden JS ile kesin tıklama yapıyoruz
+            print("🔍 Menü butonu Akıllı XPath ile aranıyor...")
+            # presence_of_element_located kullanıyoruz (element ekranda görünmez olsa bile bulur)
+            menu_butonu = wait.until(EC.presence_of_element_located((By.XPATH, akilli_xpath)))
+            
+            # Normal click() yerine JS click kullanıyoruz. 
+            # Bu sayede menü kapalı/daraltılmış olsa bile acımadan tıklar.
             driver.execute_script("arguments[0].click();", menu_butonu)
-            print("👆 Menü butonuna tıklandı, sayfanın yüklenmesi bekleniyor...")
+            print("👆 Menü butonuna zorla tıklandı, İframe bekleniyor...")
             
             # Tıkladıktan sonra İframe'in gelmesini bekle
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
