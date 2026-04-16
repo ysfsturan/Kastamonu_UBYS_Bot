@@ -256,20 +256,37 @@ def main():
         
         print(f"🔗 Şu anki URL: {driver.current_url}")
         
-        print("📖 Dersler/Notlar sayfasına gidiliyor...")
+print("📖 Dersler/Notlar sayfasına gidiliyor...")
         driver.get("https://ubys.kastamonu.edu.tr/AIS/Student/Class/Index")
-        time.sleep(7)
         
-        print("🔍 İframe (Tablo Çerçevesi) aranıyor...")
-        ifr = driver.find_elements(By.TAG_NAME, "iframe")
-        if ifr:
-            print(f"✅ {len(ifr)} adet iframe bulundu, içine giriliyor...")
-            driver.switch_to.frame(ifr[0])
-        else:
-            print("⚠️ İframe bulunamadı! Sayfada tablo yüklenmemiş olabilir.")
+        print("🔍 Sayfanın tam yüklenmesi ve İframe aranıyor...")
+        try:
+            # 7 saniye kör bekleme yerine, iframe görünene kadar maksimum 20 saniye bekliyoruz
+            wait = WebDriverWait(driver, 20)
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
+            
+            print(f"🔗 Başarılı URL: {driver.current_url}")
+            
+            ifr = driver.find_elements(By.TAG_NAME, "iframe")
+            if ifr:
+                print(f"✅ {len(ifr)} adet iframe bulundu, içine giriliyor...")
+                driver.switch_to.frame(ifr[0])
+            else:
+                print("⚠️ İframe DOM'da var ama listelenemedi!")
+                
+        except Exception as e:
+            print("❌ HATA: İframe 20 saniye içinde YÜKLENMEDİ!")
+            print(f"🔗 Bizi Geri Attığı URL: {driver.current_url}")
+            
+            # Gözetleme Modu: Botun o an ekranda ne gördüğünü loglara yazdırıyoruz
+            try:
+                ekran_yazisi = driver.find_element(By.TAG_NAME, "body").text
+                print(f"👁️ Ekranda şu an yazan metinler (İlk 500 karakter):\n{ekran_yazisi[:500]}")
+            except:
+                print("⚠️ Ekranda okunacak bir metin bile yok, sayfa yüklenmemiş.")
 
         html = driver.page_source
-        driver.switch_to.default_content() if ifr else None
+        driver.switch_to.default_content() if 'ifr' in locals() and ifr else None
         
         if html:
             soup = BeautifulSoup(html, "html.parser")
