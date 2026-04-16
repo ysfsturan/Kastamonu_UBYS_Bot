@@ -256,15 +256,24 @@ def main():
         
         print(f"🔗 Şu anki URL: {driver.current_url}")
         
-        print("📖 Dersler/Notlar sayfasına gidiliyor...")
-        driver.get("https://ubys.kastamonu.edu.tr/AIS/Student/Class/Index")
+        print("📖 Dersler/Notlar sayfasına menüden tıklanarak gidiliyor...")
         
-        print("🔍 Sayfanın tam yüklenmesi ve İframe aranıyor...")
+        # 1. Bekleme: Ana sayfa menülerinin yüklenmesi için ufak bir bekleme
+        time.sleep(3)
+        
         try:
-            # 7 saniye kör bekleme yerine, iframe görünene kadar maksimum 20 saniye bekliyoruz
             wait = WebDriverWait(driver, 20)
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
+            notlar_butonu_xpath = '/html/body/div[2]/div[2]/div[2]/div/div/div/div/div[2]/ul/li[1]'
             
+            print("🔍 Menü butonu aranıyor...")
+            menu_butonu = wait.until(EC.presence_of_element_located((By.XPATH, notlar_butonu_xpath)))
+            
+            # Normal click() bazen animasyonlara takılır, bu yüzden JS ile kesin tıklama yapıyoruz
+            driver.execute_script("arguments[0].click();", menu_butonu)
+            print("👆 Menü butonuna tıklandı, sayfanın yüklenmesi bekleniyor...")
+            
+            # Tıkladıktan sonra İframe'in gelmesini bekle
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
             print(f"🔗 Başarılı URL: {driver.current_url}")
             
             ifr = driver.find_elements(By.TAG_NAME, "iframe")
@@ -275,15 +284,14 @@ def main():
                 print("⚠️ İframe DOM'da var ama listelenemedi!")
                 
         except Exception as e:
-            print("❌ HATA: İframe 20 saniye içinde YÜKLENMEDİ!")
+            print(f"❌ HATA: Menüye tıklama veya İframe yüklenmesi BAŞARISIZ! Hata: {str(e)}")
             print(f"🔗 Bizi Geri Attığı URL: {driver.current_url}")
             
-            # Gözetleme Modu: Botun o an ekranda ne gördüğünü loglara yazdırıyoruz
             try:
                 ekran_yazisi = driver.find_element(By.TAG_NAME, "body").text
-                print(f"👁️ Ekranda şu an yazan metinler (İlk 500 karakter):\n{ekran_yazisi[:500]}")
+                print(f"👁️ Ekranda şu an yazan metinler:\n{ekran_yazisi[:500]}")
             except:
-                print("⚠️ Ekranda okunacak bir metin bile yok, sayfa yüklenmemiş.")
+                pass
 
         html = driver.page_source
         driver.switch_to.default_content() if 'ifr' in locals() and ifr else None
