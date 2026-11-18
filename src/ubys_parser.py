@@ -30,6 +30,7 @@ _EMPTY_MARKERS = {
     "-",
     "--",
     "---",
+    "girmedi",
     "girilmedi",
     "aciklanmadi",
     "açıklanmadı",
@@ -229,6 +230,18 @@ def _extract_class_id_from_cells(cells: list[Tag], preferred_indices: list[int])
     return None
 
 
+def _find_header_row(table: Tag) -> Optional[Tag]:
+    thead = table.find("thead")
+    if thead:
+        row = thead.find("tr")
+        if row:
+            return row
+    first_row = table.find("tr")
+    if first_row and first_row.find("th"):
+        return first_row
+    return None
+
+
 def _map_grade_table_columns(table: Tag) -> dict[str, int]:
     """Tablo başlıklarından sütun indekslerini dinamik olarak eşler."""
     defaults = {
@@ -239,12 +252,7 @@ def _map_grade_table_columns(table: Tag) -> dict[str, int]:
         "letter_grade": 7,
         "status": 8,
     }
-    thead = table.find("thead")
-    header_row = thead.find("tr") if thead else None
-    if header_row is None:
-        first_row = table.find("tr")
-        if first_row and first_row.find("th"):
-            header_row = first_row
+    header_row = _find_header_row(table)
     if header_row is None:
         return defaults
 
@@ -273,7 +281,20 @@ def _map_grade_table_columns(table: Tag) -> dict[str, int]:
 def _parse_inline_exam_row(exam_row: Tag) -> list[ExamGrade]:
     """Ana ders satırının hemen altındaki satırdan özet sınav notlarını ayrıştırır."""
     exams: list[ExamGrade] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
+    non_blank_empty_markers = _EMPTY_MARKERS - {""}
+
+    def _add_exam(raw_label: str, raw_val: str, exam_type_override: Optional[str] = None) -> None:
+        label = _clean_text(raw_label).rstrip(" :-").strip()
+        norm_key = _tr_lower(label)
+        if not norm_key or norm_key in seen:
+            return
+        score = normalize_score(raw_val)
+        if score is None and _tr_lower(_clean_text(raw_val)) not in non_blank_empty_markers:
+            return
+        seen.add(norm_key)
+        exam_type = _clean_text(exam_type_override).rstrip(" :-").strip() if exam_type_override else label
+        exams.append(ExamGrade(exam_type=exam_type, name=label, score=score))
 
     # İç içe tablo varsa önce yapılandırılmış satırları dene
     for nested_table in exam_row.find_all("table"):
@@ -288,12 +309,7 @@ def _parse_inline_exam_row(exam_row: Tag) -> list[ExamGrade]:
                     _tr_lower(h) in {"sınav adı", "sınav tipi", "sınav notu"} for h in headers
                 ):
                     for label, raw_val in zip(headers, values):
-                        score = normalize_score(raw_val)
-                        if label and (score is not None or raw_val in {"-", "--"}):
-                            key = (label, label)
-                            if key not in seen:
-                                seen.add(key)
-                                exams.append(ExamGrade(exam_type=label, name=label, score=score))
+                        _add_exam(label, raw_val)
                     continue
 
         nested_rows = nested_table.find_all("tr")
@@ -303,12 +319,7 @@ def _parse_inline_exam_row(exam_row: Tag) -> list[ExamGrade]:
                 label = n_cells[0]
                 if re.match(r"^[+-]?\d+(?:[.,]\d+)?$", label):
                     continue
-                score = normalize_score(n_cells[-1])
-                if label and (score is not None or n_cells[-1] in {"-", "--"}):
-                    key = (label, label)
-                    if key not in seen:
-                        seen.add(key)
-                        exams.append(ExamGrade(exam_type=label, name=label, score=score))
+                _add_exam(label, n_cells[-1])
 
     # Metin bazlı kalıpları tara (örn. "Vize: 75", "Final: 80")
     segments: list[str] = []
@@ -324,12 +335,8 @@ def _parse_inline_exam_row(exam_row: Tag) -> list[ExamGrade]:
     for segment in segments:
         for match in _EXAM_INLINE_PATTERN.finditer(segment):
             exam_name = _clean_text(match.group(1))
-            score = normalize_score(match.group(2))
             exam_type = exam_name.split()[0] if exam_name else exam_name
-            key = (exam_type, exam_name)
-            if key not in seen:
-                seen.add(key)
-                exams.append(ExamGrade(exam_type=exam_type, name=exam_name, score=score))
+            _add_exam(exam_name, match.group(2), exam_type_override=exam_type)
 
     return exams
 
@@ -439,8 +446,7 @@ def _map_detail_exam_columns(table: Tag) -> dict[str, int]:
         "ranking": 5,
         "average": 6,
     }
-    thead = table.find("thead")
-    header_row = thead.find("tr") if thead else None
+    header_row = _find_header_row(table)
     if header_row is None:
         return defaults
 
@@ -466,6 +472,17 @@ def _map_detail_exam_columns(table: Tag) -> dict[str, int]:
     return {**defaults, **mapped}
 
 
+def _find_exam_table(container: Tag) -> Optional[Tag]:
+    for table in container.find_all("table"):
+        header_row = _find_header_row(table)
+        if header_row is None:
+            continue
+        header_text = _tr_lower(header_row.get_text(" ", strip=True))
+        if "sınav tipi" in header_text or "sınav notu" in header_text or "sınav adı" in header_text:
+            return table
+    return None
+
+
 def parse_class_detail(html: str) -> dict[str, Any]:
     """/AIS/Student/Class/ClassDetail HTML sayfasından sınav ve ortalama detaylarını ayrıştırır."""
     if is_login_page(html):
@@ -489,14 +506,11 @@ def parse_class_detail(html: str) -> dict[str, Any]:
 
     # 2. Sınav tablosu
     tab_pane = soup.select_one("div.tab-pane.active") or soup
-    exam_table = tab_pane.select_one(".table-responsive table")
-    if exam_table is None:
-        for table in soup.find_all("table"):
-            thead = table.find("thead")
-            header_text = _tr_lower(thead.get_text(" ", strip=True)) if thead else ""
-            if "sınav tipi" in header_text or "sınav notu" in header_text or "sınav adı" in header_text:
-                exam_table = table
-                break
+    exam_table = (
+        _find_exam_table(tab_pane)
+        or _find_exam_table(soup)
+        or tab_pane.select_one(".table-responsive table")
+    )
 
     if exam_table is not None:
         col_map = _map_detail_exam_columns(exam_table)

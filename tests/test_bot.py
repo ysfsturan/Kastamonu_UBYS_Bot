@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 from src.config import Config, ConfigError, load_config
 from src.differ import (
     GistStateStore,
@@ -21,6 +23,7 @@ from src.differ import (
 from src.main import run_once
 from src.models import CourseGrade, ExamGrade
 from src.notifier import (
+    TelegramNotifier,
     format_baseline_summary,
     format_grade_changes,
     split_message,
@@ -516,6 +519,79 @@ class ConfigAndGistTests(unittest.TestCase):
             client.patch.return_value = MagicMock(status_code=403)
             with self.assertRaises(StateStorageError):
                 store.save(state_payload)
+
+
+class RegressionTests(unittest.TestCase):
+    def test_inline_nested_table_colon_and_girmedi_dedup(self) -> None:
+        html = """
+        <div class="panel panel-default">
+          <div class="panel-heading">2026 - Güz</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Ders Kodu</th>
+                <th>Ders Adı</th>
+                <th>Kredi</th>
+                <th>AKTS</th>
+                <th>Devam</th>
+                <th>Vize</th>
+                <th>Geçme Notu</th>
+                <th>HBN</th>
+                <th>Başarı Durumu</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td rowspan="2"><a href="/AIS/Student/Class/ClassDetail?classId=ABC%21">BPBZ201</a></td>
+                <td>İnternet Programcılığı</td>
+                <td>3</td>
+                <td>5</td>
+                <td>-</td>
+                <td>-</td>
+                <td>0</td>
+                <td>-</td>
+                <td>Devamlı</td>
+              </tr>
+              <tr>
+                <td colspan="8">
+                  <table>
+                    <tr><td>Vize :</td><td>Girmedi</td></tr>
+                    <tr><td>Final :</td><td>Girmedi</td></tr>
+                  </table>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        """
+        self.assertIsNone(normalize_score("Girmedi"))
+        self.assertEqual(normalize_score("G"), "G")
+
+        courses = parse_grades_index(html)
+        self.assertEqual(len(courses), 1)
+        self.assertEqual([(e.name, e.score) for e in courses[0].exams], [("Vize", None), ("Final", None)])
+
+    def test_telegram_notifier_retries_on_timeout_and_uses_ipv4(self) -> None:
+        notifier = TelegramNotifier("bot-token", ["12345"], timeout=10.0, max_retries=3, retry_delay=0.5)
+        ok_resp = MagicMock(status_code=200)
+        ok_resp.json.return_value = {"ok": True}
+
+        with (
+            patch("src.notifier.httpx.HTTPTransport") as mock_transport,
+            patch("src.notifier.httpx.Client") as mock_client_cls,
+            patch("src.notifier.time.sleep") as mock_sleep,
+        ):
+            client = mock_client_cls.return_value.__enter__.return_value
+            client.post.side_effect = [
+                httpx.ReadTimeout("The read operation timed out"),
+                ok_resp,
+            ]
+
+            notifier.send_message("Merhaba test")
+
+            mock_transport.assert_called_once_with(local_address="0.0.0.0")
+            self.assertEqual(client.post.call_count, 2)
+            mock_sleep.assert_called_once_with(0.5)
 
 
 if __name__ == "__main__":

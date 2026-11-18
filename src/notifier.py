@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import html
+import logging
+import time
 from collections import OrderedDict
-from typing import Iterable
+from typing import Any, Iterable, Optional
 
 import httpx
 
 from .models import CourseGrade, GradeChange
+
+logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LENGTH = 4000
 
@@ -47,23 +51,56 @@ def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]
     return chunks
 
 
+def _build_ipv4_transport() -> Optional[httpx.HTTPTransport]:
+    try:
+        return httpx.HTTPTransport(local_address="0.0.0.0")
+    except OSError:
+        return None
+
+
+def _extract_telegram_error(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+        if isinstance(data, dict) and data.get("description"):
+            return str(data["description"])
+    except Exception:
+        pass
+    return response.text[:200] or f"HTTP {response.status_code}"
+
+
 class TelegramNotifier:
     """Telegram Bot API üzerinden HTML formatlı bildirim gönderir."""
 
-    def __init__(self, bot_token: str, chat_ids: Iterable[str], timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        bot_token: str,
+        chat_ids: Iterable[str],
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+    ) -> None:
         self.bot_token = bot_token
         self.chat_ids = [str(cid).strip() for cid in chat_ids if str(cid).strip()]
         self.timeout = timeout
+        self.max_retries = max(1, max_retries)
+        self.retry_delay = max(0.0, retry_delay)
 
     def send_message(self, text: str) -> None:
-        """Mesajı yapılandırılmış tüm Telegram sohbetlerine gönderir."""
+        """Mesajı yapılandırılmış tüm Telegram sohbetlerine IPv4 ve yeniden denemeyle gönderir."""
         if not text.strip():
             return
 
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         chunks = split_message(text)
 
-        with httpx.Client(timeout=self.timeout) as client:
+        client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(self.timeout, connect=min(15.0, self.timeout)),
+        }
+        transport = _build_ipv4_transport()
+        if transport is not None:
+            client_kwargs["transport"] = transport
+
+        with httpx.Client(**client_kwargs) as client:
             for chat_id in self.chat_ids:
                 for chunk in chunks:
                     payload = {
@@ -72,13 +109,45 @@ class TelegramNotifier:
                         "parse_mode": "HTML",
                         "disable_web_page_preview": True,
                     }
-                    response = client.post(url, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
-                    if not data.get("ok"):
-                        raise RuntimeError(
-                            f"Telegram API hatası (chat_id={chat_id}): {data.get('description', data)}"
-                        )
+                    self._post_chunk_with_retry(client, url, chat_id, payload)
+
+    def _post_chunk_with_retry(
+        self,
+        client: httpx.Client,
+        url: str,
+        chat_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = client.post(url, json=payload)
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if attempt >= self.max_retries:
+                    raise
+                wait_seconds = self.retry_delay * attempt
+                logger.warning(
+                    "Telegram isteği başarısız (%d/%d), %.1f sn sonra yeniden denenecek: %s",
+                    attempt,
+                    self.max_retries,
+                    wait_seconds,
+                    exc,
+                )
+                if wait_seconds > 0:
+                    time.sleep(wait_seconds)
+                continue
+
+            if response.status_code >= 400:
+                desc = _extract_telegram_error(response)
+                raise RuntimeError(
+                    f"Telegram API hatası (HTTP {response.status_code}, chat_id={chat_id}): {desc}"
+                )
+
+            data = response.json()
+            if not data.get("ok"):
+                raise RuntimeError(
+                    f"Telegram API hatası (chat_id={chat_id}): {data.get('description', data)}"
+                )
+            return
 
 
 def format_grade_changes(changes: list[GradeChange], base_url: str) -> str:
