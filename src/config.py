@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -28,7 +28,13 @@ def _parse_bool(raw: Optional[str], default: bool, name: str) -> bool:
     raise ConfigError(f"'{name}' için geçersiz mantıksal değer: {raw!r} (true/false olmalı).")
 
 
-def _parse_int(raw: Optional[str], default: int, name: str, minimum: int = 1) -> int:
+def _parse_int(
+    raw: Optional[str],
+    default: int,
+    name: str,
+    minimum: int = 1,
+    maximum: Optional[int] = None,
+) -> int:
     if raw is None or raw.strip() == "":
         return default
     try:
@@ -37,6 +43,8 @@ def _parse_int(raw: Optional[str], default: int, name: str, minimum: int = 1) ->
         raise ConfigError(f"'{name}' geçerli bir tam sayı olmalıdır: {raw!r}") from exc
     if value < minimum:
         raise ConfigError(f"'{name}' en az {minimum} olmalıdır (verilen: {value}).")
+    if maximum is not None and value > maximum:
+        raise ConfigError(f"'{name}' en fazla {maximum} olmalıdır (verilen: {value}).")
     return value
 
 
@@ -50,6 +58,34 @@ def _parse_float(raw: Optional[str], default: float, name: str, minimum: float =
     if value < minimum:
         raise ConfigError(f"'{name}' en az {minimum} olmalıdır (verilen: {value}).")
     return value
+
+
+def _parse_int_list(raw: Optional[str], default: list[int], name: str) -> list[int]:
+    if raw is None or raw.strip() == "":
+        return list(default)
+    result: list[int] = []
+    seen: set[int] = set()
+    for part in raw.split(","):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+        try:
+            value = int(cleaned)
+        except ValueError as exc:
+            raise ConfigError(f"'{name}' virgülle ayrılmış tam sayılar içermelidir: {raw!r}") from exc
+        if value < 0:
+            raise ConfigError(f"'{name}' negatif sayı içeremez: {value}")
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result or list(default)
+
+
+def _validate_http_url(raw: str, name: str) -> str:
+    url = raw.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise ConfigError(f"{name} geçerli bir HTTP(S) adresi olmalıdır: {url!r}")
+    return url
 
 
 @dataclass(frozen=True)
@@ -72,12 +108,33 @@ class Config:
     check_interval_minutes: int = 20
     notify_on_first_run: bool = True
     alert_after_consecutive_errors: int = 3
+    enable_grades: bool = True
+    enable_dining: bool = True
+    enable_calendar: bool = True
+    sks_url: str = "https://sks.kastamonu.edu.tr/"
+    dining_sheet_url: Optional[str] = None
+    dining_notify_hour: int = 8
+    calendar_url: str = "https://akademiktakvim.kastamonu.edu.tr/"
+    calendar_faculty: str = "GENEL"
+    calendar_categories: str = "STUDENT"
+    calendar_reminder_days: list[int] = field(default_factory=lambda: [7, 3, 1, 0])
+    calendar_lookahead_days: int = 30
+    calendar_notify_hour: int = 8
+    calendar_weekly_summary: bool = True
 
 
-def load_config(require_telegram: bool = True) -> Config:
+def load_config(
+    require_telegram: bool = True,
+    require_ubys: Optional[bool] = None,
+) -> Config:
     """Ortam değişkenlerinden ve .env dosyasından Config nesnesi oluşturur."""
     if load_dotenv is not None:
         load_dotenv()
+
+    enable_grades = _parse_bool(os.getenv("ENABLE_GRADES"), True, "ENABLE_GRADES")
+    enable_dining = _parse_bool(os.getenv("ENABLE_DINING"), True, "ENABLE_DINING")
+    enable_calendar = _parse_bool(os.getenv("ENABLE_CALENDAR"), True, "ENABLE_CALENDAR")
+    needs_ubys = enable_grades if require_ubys is None else require_ubys
 
     ubys_username = (os.getenv("UBYS_USERNAME") or os.getenv("OGRENCI_NO") or "").strip()
     ubys_password = (os.getenv("UBYS_PASSWORD") or os.getenv("SIFRE") or "").strip()
@@ -86,10 +143,11 @@ def load_config(require_telegram: bool = True) -> Config:
     telegram_chat_ids = [cid.strip() for cid in raw_chat_ids.split(",") if cid.strip()]
 
     missing: list[str] = []
-    if not ubys_username:
-        missing.append("UBYS_USERNAME")
-    if not ubys_password:
-        missing.append("UBYS_PASSWORD")
+    if needs_ubys:
+        if not ubys_username:
+            missing.append("UBYS_USERNAME")
+        if not ubys_password:
+            missing.append("UBYS_PASSWORD")
     if require_telegram:
         if not telegram_bot_token:
             missing.append("TELEGRAM_BOT_TOKEN")
@@ -109,12 +167,29 @@ def load_config(require_telegram: bool = True) -> Config:
         raise ConfigError("GIST_ID ve GIST_TOKEN birlikte tanımlanmalıdır.")
     gist_filename = os.getenv("GIST_FILENAME", "grades_state.json").strip() or "grades_state.json"
 
-    base_url = os.getenv("UBYS_BASE_URL", "https://ubys.kastamonu.edu.tr").strip().rstrip("/")
-    if not base_url.startswith(("http://", "https://")):
-        raise ConfigError(f"UBYS_BASE_URL geçerli bir HTTP(S) adresi olmalıdır: {base_url!r}")
+    base_url = _validate_http_url(
+        os.getenv("UBYS_BASE_URL", "https://ubys.kastamonu.edu.tr"),
+        "UBYS_BASE_URL",
+    )
+    sks_url = _validate_http_url(
+        os.getenv("SKS_URL", "https://sks.kastamonu.edu.tr"),
+        "SKS_URL",
+    ) + "/"
+    calendar_url = _validate_http_url(
+        os.getenv("CALENDAR_URL", "https://akademiktakvim.kastamonu.edu.tr"),
+        "CALENDAR_URL",
+    ) + "/"
+
+    dining_sheet_url = os.getenv("DINING_SHEET_URL", "").strip() or None
+    if dining_sheet_url:
+        _validate_http_url(dining_sheet_url, "DINING_SHEET_URL")
 
     user_group_id = os.getenv("UBYS_USER_GROUP_ID", "").strip() or None
     state_file_str = os.getenv("STATE_FILE", "data/grades_state.json").strip() or "data/grades_state.json"
+    calendar_faculty = (
+        os.getenv("CALENDAR_FACULTY") or os.getenv("BOLUM_TIPI") or "GENEL"
+    ).strip() or "GENEL"
+    calendar_categories = os.getenv("CALENDAR_CATEGORIES", "STUDENT").strip() or "STUDENT"
 
     return Config(
         ubys_username=ubys_username,
@@ -138,5 +213,28 @@ def load_config(require_telegram: bool = True) -> Config:
         notify_on_first_run=_parse_bool(os.getenv("NOTIFY_ON_FIRST_RUN"), True, "NOTIFY_ON_FIRST_RUN"),
         alert_after_consecutive_errors=_parse_int(
             os.getenv("ALERT_AFTER_CONSECUTIVE_ERRORS"), 3, "ALERT_AFTER_CONSECUTIVE_ERRORS", minimum=1
+        ),
+        enable_grades=enable_grades,
+        enable_dining=enable_dining,
+        enable_calendar=enable_calendar,
+        sks_url=sks_url,
+        dining_sheet_url=dining_sheet_url,
+        dining_notify_hour=_parse_int(
+            os.getenv("DINING_NOTIFY_HOUR"), 8, "DINING_NOTIFY_HOUR", minimum=0, maximum=23
+        ),
+        calendar_url=calendar_url,
+        calendar_faculty=calendar_faculty,
+        calendar_categories=calendar_categories,
+        calendar_reminder_days=_parse_int_list(
+            os.getenv("CALENDAR_REMINDER_DAYS"), [7, 3, 1, 0], "CALENDAR_REMINDER_DAYS"
+        ),
+        calendar_lookahead_days=_parse_int(
+            os.getenv("CALENDAR_LOOKAHEAD_DAYS"), 30, "CALENDAR_LOOKAHEAD_DAYS", minimum=1
+        ),
+        calendar_notify_hour=_parse_int(
+            os.getenv("CALENDAR_NOTIFY_HOUR"), 8, "CALENDAR_NOTIFY_HOUR", minimum=0, maximum=23
+        ),
+        calendar_weekly_summary=_parse_bool(
+            os.getenv("CALENDAR_WEEKLY_SUMMARY"), True, "CALENDAR_WEEKLY_SUMMARY"
         ),
     )

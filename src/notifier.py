@@ -6,11 +6,12 @@ import html
 import logging
 import time
 from collections import OrderedDict
+from datetime import date
 from typing import Any, Iterable, Optional
 
 import httpx
 
-from .models import CourseGrade, GradeChange
+from .models import CalendarEvent, CourseGrade, DailyMenu, GradeChange
 
 logger = logging.getLogger(__name__)
 
@@ -262,3 +263,182 @@ def format_test_summary(courses: list[CourseGrade]) -> str:
 def format_error_alert(title: str, detail: str) -> str:
     """Hata uyarı mesajını Telegram HTML formatında hazırlar."""
     return f"⚠️ <b>{html.escape(title)}</b>\n\n{html.escape(detail)}"
+
+
+_TR_MONTHS = (
+    "",
+    "Ocak",
+    "Şubat",
+    "Mart",
+    "Nisan",
+    "Mayıs",
+    "Haziran",
+    "Temmuz",
+    "Ağustos",
+    "Eylül",
+    "Ekim",
+    "Kasım",
+    "Aralık",
+)
+_TR_WEEKDAYS = (
+    "Pazartesi",
+    "Salı",
+    "Çarşamba",
+    "Perşembe",
+    "Cuma",
+    "Cumartesi",
+    "Pazar",
+)
+_DINING_CATEGORY_ICONS = {
+    "Çorba": "🥣",
+    "Ana Yemek": "🍖",
+    "Yardımcı": "🍝",
+    "Soğuk / Tatlı": "🥗",
+}
+_CALENDAR_ICON_RULES = (
+    (("ara sınav", "vize"), "📝"),
+    (("yarıyıl sonu", "final"), "🏁"),
+    (("bütünleme", "mazeret", "ek sınav", "tek ders"), "🆘"),
+    (("kayıt", "danışman", "ders ekleme"), "📋"),
+    (("tatil", "bayram", "yılbaşı"), "🎉"),
+    (("kuzem", "uzaktan"), "💻"),
+)
+
+
+def format_tr_date(d: date, with_weekday: bool = True) -> str:
+    base = f"{d.day} {_TR_MONTHS[d.month]} {d.year}"
+    if with_weekday:
+        return f"{base}, {_TR_WEEKDAYS[d.weekday()]}"
+    return base
+
+
+def _format_event_date_range(event: CalendarEvent) -> str:
+    if event.start_date == event.end_date:
+        return format_tr_date(event.start_date, with_weekday=False)
+    return (
+        f"{format_tr_date(event.start_date, with_weekday=False)} – "
+        f"{format_tr_date(event.end_date, with_weekday=False)}"
+    )
+
+
+def _calendar_event_icon(event: CalendarEvent) -> str:
+    haystack = f"{event.title} {event.category}".replace("İ", "i").replace("I", "ı").lower()
+    for keywords, icon in _CALENDAR_ICON_RULES:
+        if any(kw in haystack for kw in keywords):
+            return icon
+    return "📅"
+
+
+def format_daily_menu(menu: DailyMenu, is_next_preview: bool = False) -> str:
+    """Günlük yemekhane menüsünü Telegram HTML mesajına dönüştürür."""
+    header = "🍽️ <b>Yaklaşan İlk Yemekhane Menüsü</b>" if is_next_preview else "🍽️ <b>Günün Yemekhane Menüsü</b>"
+    lines: list[str] = [
+        header,
+        f"📅 <i>{html.escape(format_tr_date(menu.menu_date))}</i>",
+        "",
+    ]
+
+    for item in menu.items:
+        icon = _DINING_CATEGORY_ICONS.get(item.category, "🍴")
+        cal_suffix = f" <i>({html.escape(item.calories)})</i>" if item.calories else ""
+        lines.append(f"{icon} <b>{html.escape(item.name)}</b>{cal_suffix}")
+
+    if menu.total_calories_min is not None and menu.total_calories_max is not None:
+        lines.append("")
+        if menu.total_calories_min == menu.total_calories_max:
+            lines.append(f"🔥 <b>Toplam Kalori:</b> ~<code>{menu.total_calories_min} kkal</code>")
+        else:
+            lines.append(
+                f"🔥 <b>Toplam Kalori:</b> ~<code>{menu.total_calories_min}–{menu.total_calories_max} kkal</code>"
+            )
+
+    source_url = menu.source_url or "https://sks.kastamonu.edu.tr/"
+    lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(source_url, quote=True)}">Yemek Listesini Aç</a>')
+    return "\n".join(lines)
+
+
+def format_calendar_reminders(
+    reminders: list[tuple[CalendarEvent, int]],
+    faculty: str,
+    calendar_url: str,
+) -> str:
+    """Eşik günlerine giren akademik takvim etkinlikleri için hatırlatma mesajı üretir."""
+    lines: list[str] = [
+        "📣 <b>Akademik Takvim Hatırlatması</b>",
+        f"🏛️ <i>Birim: {html.escape(faculty)}</i>",
+        "",
+    ]
+
+    for event, days_until in reminders:
+        if days_until == 0:
+            badge = "🚨 <b>BUGÜN BAŞLIYOR</b>"
+        elif days_until == 1:
+            badge = "⏰ <b>YARIN BAŞLIYOR</b>"
+        else:
+            badge = f"⏳ <b>{days_until} GÜN KALDI</b>"
+
+        icon = _calendar_event_icon(event)
+        lines.append(f"{badge} • {icon} <b>{html.escape(event.title)}</b>")
+
+        meta = [_format_event_date_range(event)]
+        if event.category:
+            meta.append(event.category)
+        lines.append(f"   └ {html.escape(' | '.join(meta))}")
+        if event.google_calendar_url:
+            gcal_href = html.escape(event.google_calendar_url, quote=True)
+            lines.append(f'   └ <a href="{gcal_href}">Google Takvime Ekle</a>')
+        lines.append("")
+
+    lines.append(f'🔗 <a href="{html.escape(calendar_url, quote=True)}">Akademik Takvim\'e Git</a>')
+    return "\n".join(lines)
+
+
+def format_calendar_digest(
+    ongoing: list[CalendarEvent],
+    upcoming: list[CalendarEvent],
+    today: date,
+    faculty: str,
+    term: str,
+    lookahead_days: int,
+    calendar_url: str,
+    max_items: int = 12,
+) -> str:
+    """Haftalık veya isteğe bağlı akademik takvim özet mesajı oluşturur."""
+    lines: list[str] = [
+        "📅 <b>Akademik Takvim Özeti</b>",
+        f"🏛️ <i>{html.escape(faculty)} ({html.escape(term)})</i>",
+        "",
+    ]
+
+    if ongoing:
+        lines.append("⏳ <b>Şu An Devam Edenler</b>")
+        for event in ongoing[:max_items]:
+            icon = _calendar_event_icon(event)
+            days_left = (event.end_date - today).days
+            left_text = "Bugün son gün" if days_left == 0 else f"Bitime {days_left} gün"
+            lines.append(
+                f"• {icon} <b>{html.escape(event.title)}</b>\n"
+                f"  {html.escape(_format_event_date_range(event))} ({left_text})"
+            )
+        lines.append("")
+
+    if upcoming:
+        lines.append(f"🗓️ <b>Yaklaşan Etkinlikler (Önümüzdeki {lookahead_days} Gün)</b>")
+        for event in upcoming[:max_items]:
+            icon = _calendar_event_icon(event)
+            days_until = (event.start_date - today).days
+            lines.append(
+                f"• {icon} <b>{html.escape(event.title)}</b>\n"
+                f"  {html.escape(_format_event_date_range(event))} (<b>{days_until} gün kaldı</b>)"
+            )
+        if len(upcoming) > max_items:
+            lines.append(f"<i>... ve {len(upcoming) - max_items} etkinlik daha.</i>")
+        lines.append("")
+
+    if not ongoing and not upcoming:
+        lines.append(f"Önümüzdeki {lookahead_days} gün için kayıtlı etkinlik bulunmuyor.")
+        lines.append("")
+
+    lines.append(f'🔗 <a href="{html.escape(calendar_url, quote=True)}">Akademik Takvim\'e Git</a>')
+    return "\n".join(lines)

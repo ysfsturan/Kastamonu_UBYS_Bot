@@ -6,11 +6,21 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
 
+from src.calendar_tracker import (
+    CalendarError,
+    extract_active_term,
+    filter_events_by_categories,
+    find_milestone_reminders,
+    find_ongoing_and_upcoming,
+    parse_calendar_api_json,
+    resolve_faculty_name,
+)
 from src.config import Config, ConfigError, load_config
 from src.differ import (
     GistStateStore,
@@ -20,11 +30,22 @@ from src.differ import (
     load_state,
     save_state,
 )
-from src.main import run_once
-from src.models import CourseGrade, ExamGrade
+from src.dining import (
+    DiningError,
+    build_csv_export_url,
+    extract_dining_sheet_url,
+    get_next_menu,
+    parse_dining_csv,
+    tr_title,
+)
+from src.main import TR_TZ, run_once
+from src.models import CalendarEvent, CourseGrade, DailyMenu, DiningItem, ExamGrade
 from src.notifier import (
     TelegramNotifier,
     format_baseline_summary,
+    format_calendar_digest,
+    format_calendar_reminders,
+    format_daily_menu,
     format_grade_changes,
     split_message,
 )
@@ -399,6 +420,8 @@ class NotifierAndFlowTests(unittest.TestCase):
                 telegram_chat_ids=["12345"],
                 state_file=state_path,
                 alert_after_consecutive_errors=2,
+                enable_dining=False,
+                enable_calendar=False,
             )
 
             sample_courses = [
@@ -592,6 +615,260 @@ class RegressionTests(unittest.TestCase):
             mock_transport.assert_called_once_with(local_address="0.0.0.0")
             self.assertEqual(client.post.call_count, 2)
             mock_sleep.assert_called_once_with(0.5)
+
+
+SAMPLE_SKS_HTML = """
+<html><body>
+  <a href="https://sks.kastamonu.edu.tr/images/formlar/BARINMA%20BILGI.pdf">Barınma</a>
+  <a href="https://docs.google.com/spreadsheets/d/1h0bA-ByWSHOF5CGWMgsHPkSZ7WgiXMyTwrZlcu6Po0E/edit#gid=0">
+    <i class="fas fa-money-bill-wave"></i> Yemekhane Listesi
+  </a>
+</body></html>
+"""
+
+SAMPLE_DINING_CSV = """\ufeff,,,,,,,,,
+,KASTAMONU ÜNİVERSİTESİ REKTÖRLÜĞÜ 2026 GÜNCEL YEMEK LİSTESİ,,,,,,,,
+,TARİH,1.YEMEK,,2.YEMEK,,3.YEMEK,,SOĞUK ÇEŞİTLER,
+,2.11.2026,EZOGELİN Ç.,185KKAL,PÜRELİ TAVUK ŞİNİTZEL,474KKAL,SOSLU MAKARNA,365KKAL,MEVSİM SALATA,30KKAL
+,4.11.2026,KAŞ. DOM. Ç.,189KKAL,KIYMALI FIRIN PATATES/ SOSLU FIRIN TAVUK,224KKAL/ 302KKAL,BULGUR PİLAVI,219KKAL,AYRAN,44KKAL
+,19.11.2026,EZOGELİN Ç.,185KKAL,PÜRELİ ROSTO KÖFTE,370KKAL,SEBZELİ MAKARNA,348KKAL,CEVİZLİ KABAK TATLISI,194KKAL
+,1.12.2026,EZOGELİN Ç.,185KKAL,ÇOBAN KAVURMA,332KKAL,SEBZELİ BULGUR PİLAVI,143KKAL,CEVİZLİ KABAK TATLISI,194KKAL
+,Türker İhsan DEMİRTAŞ,,,Ali ACARCA,,,Mehmet Sena AYGÜL,,
+"""
+
+
+class DiningTests(unittest.TestCase):
+    def test_turkish_title_and_sheet_link_extraction(self) -> None:
+        self.assertEqual(tr_title("PÜRELİ ROSTO KÖFTE"), "Püreli Rosto Köfte")
+        self.assertEqual(tr_title("İZMİR KÖFTE"), "İzmir Köfte")
+        self.assertEqual(tr_title("IZGARA KÖFTE(BULGUR PİLAVI GARNİ.)"), "Izgara Köfte (Bulgur Pilavı Garni.)")
+        self.assertEqual(tr_title("PİRİNÇ PİLAVI"), "Pirinç Pilavı")
+
+        sheet_url = extract_dining_sheet_url(SAMPLE_SKS_HTML)
+        self.assertEqual(
+            sheet_url,
+            "https://docs.google.com/spreadsheets/d/1h0bA-ByWSHOF5CGWMgsHPkSZ7WgiXMyTwrZlcu6Po0E/edit#gid=0",
+        )
+        self.assertEqual(
+            build_csv_export_url(sheet_url or ""),
+            "https://docs.google.com/spreadsheets/d/1h0bA-ByWSHOF5CGWMgsHPkSZ7WgiXMyTwrZlcu6Po0E/export?format=csv&gid=0",
+        )
+
+    def test_parse_dining_csv_dates_calories_and_formatting(self) -> None:
+        menus = parse_dining_csv(SAMPLE_DINING_CSV, source_url="https://sks.kastamonu.edu.tr/")
+        self.assertEqual([m.menu_date for m in menus], [
+            date(2026, 11, 2),
+            date(2026, 11, 4),
+            date(2026, 11, 19),
+            date(2026, 12, 1),
+        ])
+
+        nov4 = menus[1]
+        self.assertEqual(nov4.items[1].name, "Kıymalı Fırın Patates / Soslu Fırın Tavuk")
+        self.assertEqual(nov4.items[1].calories, "224/302 kkal")
+        self.assertEqual(nov4.total_calories_min, 189 + 224 + 219 + 44)
+        self.assertEqual(nov4.total_calories_max, 189 + 302 + 219 + 44)
+
+        nov19 = menus[2]
+        self.assertEqual(nov19.total_calories_min, 1097)
+        self.assertEqual(nov19.total_calories_max, 1097)
+
+        # Hafta sonu fallback (21.11 Cumartesi -> 1.12)
+        next_menu = get_next_menu(menus, date(2026, 11, 21))
+        self.assertIsNotNone(next_menu)
+        self.assertEqual(next_menu.menu_date, date(2026, 12, 1))
+
+        msg = format_daily_menu(nov4)
+        self.assertIn("Günün Yemekhane Menüsü", msg)
+        self.assertIn("4 Kasım 2026, Çarşamba", msg)
+        self.assertIn("676–754 kkal", msg)
+
+
+class CalendarTests(unittest.TestCase):
+    def test_faculty_resolution_term_and_filtering(self) -> None:
+        self.assertEqual(resolve_faculty_name("GENEL"), "Genel")
+        self.assertEqual(resolve_faculty_name("TIP"), "Tıp Fakültesi")
+        self.assertEqual(resolve_faculty_name("VET"), "Veteriner Fakültesi")
+        self.assertEqual(resolve_faculty_name("DIS"), "Diş Hekimliği Fakültesi")
+        self.assertEqual(resolve_faculty_name("LISANSUSTU"), "Lisansüstü Eğitim Enstitüsü")
+        self.assertEqual(resolve_faculty_name("TURIZM"), "Turizm Fakültesi")
+
+        html = '<div class="timeline"><div class="timeline-item active" data-donem="2026-2027">2026-2027</div></div>'
+        self.assertEqual(extract_active_term(html), "2026-2027")
+
+        api_groups = [
+            {
+                "ay": 11,
+                "yil": 2026,
+                "etkinlikler": [
+                    {
+                        "id": 101,
+                        "baslamaTarihi": "26.11.2026",
+                        "bitisTarihi": "26.11.2026",
+                        "etkinlikAdi": "Güz Yarıyılı Ara Sınavlar",
+                        "kategori": "Ders ve Sınav",
+                        "donem": "2026-2027",
+                        "fakulte": "Genel",
+                        "googleCalendarUrl": "https://calendar.google.com/calendar/render?text=Vize",
+                    },
+                    {
+                        "id": 102,
+                        "baslamaTarihi": "22.11.2026",
+                        "bitisTarihi": "24.11.2026",
+                        "etkinlikAdi": "Pedagojik Formasyon Kayıtları",
+                        "kategori": "Pedagojik Formasyon",
+                        "donem": "2026-2027",
+                        "fakulte": "Genel",
+                    },
+                    {
+                        "id": 103,
+                        "baslamaTarihi": "20.11.2026",
+                        "bitisTarihi": "29.11.2026",
+                        "etkinlikAdi": "Güz Yarıyılı Ara Sınav Not Girişi",
+                        "kategori": "Ders ve Sınav",
+                        "donem": "2026-2027",
+                        "fakulte": "Genel",
+                    },
+                    {
+                        "id": 104,
+                        "baslamaTarihi": "21.09.2026",
+                        "bitisTarihi": "08.01.2027",
+                        "etkinlikAdi": "Güz Yarıyılı Ders Başlama/Ders Bitiş",
+                        "kategori": "Ders ve Sınav",
+                        "donem": "2026-2027",
+                        "fakulte": "Genel",
+                    },
+                ],
+            }
+        ]
+        all_events = parse_calendar_api_json(api_groups)
+        self.assertEqual(len(all_events), 4)
+
+        student_events = filter_events_by_categories(all_events, "STUDENT")
+        self.assertEqual([e.event_id for e in student_events], ["104", "103", "101"])
+        self.assertEqual(len(filter_events_by_categories(all_events, "ALL")), 4)
+
+        today = date(2026, 11, 20)
+        # 101: 6 gün sonra (eşiğin dışında), 103: bugün (0 gün kaldı)
+        reminders = find_milestone_reminders(student_events, today, [7, 3, 1, 0], sent_milestones={})
+        self.assertEqual([(e.event_id, d) for e, d in reminders], [("103", 0)])
+
+        # 19 Kasım'da 101 tam 7 gün kala eşiğinde
+        reminders_19 = find_milestone_reminders(
+            student_events,
+            date(2026, 11, 19),
+            [7, 3, 1, 0],
+            sent_milestones={},
+        )
+        self.assertEqual([(e.event_id, d) for e, d in reminders_19], [("103", 1), ("101", 7)])
+        # Tekrar bildirilmemeli
+        self.assertEqual(
+            find_milestone_reminders(
+                student_events,
+                date(2026, 11, 19),
+                [7, 3, 1, 0],
+                sent_milestones={"101:7": "2026-11-19", "103:1": "2026-11-19"},
+            ),
+            [],
+        )
+
+        ongoing, upcoming = find_ongoing_and_upcoming(student_events, today, lookahead_days=30)
+        # 104 tüm dönem (109 gün, sınav/kayıt değil) gürültü olarak dışarıda kalmalı, 103 devam edende olmalı
+        self.assertEqual([e.event_id for e in ongoing], ["103"])
+        self.assertEqual([e.event_id for e in upcoming], ["101"])
+
+        rem_msg = format_calendar_reminders(reminders_19, "Genel", "https://akademiktakvim.kastamonu.edu.tr/")
+        self.assertIn("7 GÜN KALDI", rem_msg)
+        self.assertIn("Google Takvime Ekle", rem_msg)
+
+        digest_msg = format_calendar_digest(
+            ongoing,
+            upcoming,
+            today,
+            "Genel",
+            "2026-2027",
+            30,
+            "https://akademiktakvim.kastamonu.edu.tr/",
+        )
+        self.assertIn("Şu An Devam Edenler", digest_msg)
+        self.assertIn("Yaklaşan Etkinlikler", digest_msg)
+
+
+class SwissToolFlowTests(unittest.TestCase):
+    def test_run_once_dining_calendar_dedup_and_error_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=True,
+                enable_dining=True,
+                enable_calendar=True,
+                notify_on_first_run=False,
+            )
+
+            sample_courses = [
+                CourseGrade(
+                    semester="2026 - Güz",
+                    code="BPBZ201",
+                    name="İnternet Programcılığı",
+                )
+            ]
+            # 23 Kasım 2026 Pazartesi, saat 09:00 TR -> hafta içi & Pazartesi özet günü
+            monday_dt = datetime(2026, 11, 23, 9, 0, tzinfo=TR_TZ)
+            monday_menu = DailyMenu(
+                menu_date=date(2026, 11, 23),
+                items=[DiningItem(name="Mercimek Ç.", calories="120 kkal", category="Çorba")],
+                total_calories_min=120,
+                total_calories_max=120,
+            )
+            cal_event = CalendarEvent(
+                event_id="500",
+                title="Güz Ara Sınav",
+                start_date=date(2026, 11, 30),
+                end_date=date(2026, 12, 4),
+                category="Ders ve Sınav",
+                faculty="Genel",
+                term="2026-2027",
+            )
+
+            with (
+                patch("src.main.now_tr", return_value=monday_dt),
+                patch("src.main.UBYSClient") as mock_ubys,
+                patch("src.main.fetch_dining_menus", return_value=[monday_menu]) as mock_dining,
+                patch(
+                    "src.main.fetch_calendar_events",
+                    return_value=("Genel", "2026-2027", [cal_event]),
+                ) as mock_cal,
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                ubys_inst = mock_ubys.return_value.__enter__.return_value
+                ubys_inst.fetch_grades.return_value = sample_courses
+
+                # İlk çalıştırma: 1 yemekhane + 1 takvim hatırlatması (7 gün kala) + 1 Pazartesi özeti = 3 mesaj
+                self.assertEqual(run_once(cfg), 0)
+                self.assertEqual(mock_notifier.return_value.send_message.call_count, 3)
+
+                # Aynı gün ikinci çalıştırma: yemekhane ve takvim tekrar gönderilmemeli
+                self.assertEqual(run_once(cfg), 0)
+                self.assertEqual(mock_notifier.return_value.send_message.call_count, 3)
+                self.assertEqual(mock_dining.call_count, 1)
+                self.assertEqual(mock_cal.call_count, 1)
+
+            # Ertesi gün Salı (24 Kasım) saat 09:00 -> Yemekhane hata verse bile not takibi 0 dönmeli
+            tuesday_dt = datetime(2026, 11, 24, 9, 0, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=tuesday_dt),
+                patch("src.main.UBYSClient") as mock_ubys,
+                patch("src.main.fetch_dining_menus", side_effect=DiningError("SKS geçici hata")),
+                patch("src.main.fetch_calendar_events", side_effect=CalendarError("Takvim geçici hata")),
+                patch("src.main.TelegramNotifier"),
+            ):
+                mock_ubys.return_value.__enter__.return_value.fetch_grades.return_value = sample_courses
+                self.assertEqual(run_once(cfg), 0)
 
 
 if __name__ == "__main__":

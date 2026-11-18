@@ -1,4 +1,4 @@
-name: Kastamonu ÜBYS Not Takibi
+name: Kastamonu ÜBYS Swiss Bot
 
 on:
   schedule:
@@ -9,8 +9,19 @@ on:
 
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Çalıştırma kipi"
+        required: false
+        type: choice
+        default: once
+        options:
+          - once
+          - test_all
+          - dining
+          - calendar
+          - force_daily
       test_notify:
-        description: "Test modu: Mevcut not özetini Telegram'a gönder (Gist durumunu değiştirmez)"
+        description: "Telegram'a test bildirimi gönder (once ile test_all çalıştırır; test_all/dining/calendar ile bildirimi açar)"
         required: false
         type: boolean
         default: false
@@ -39,7 +50,7 @@ jobs:
       - name: Bağımlılıkları yükle
         run: pip install -r requirements.txt
 
-      - name: ÜBYS notlarını kontrol et
+      - name: Kastamonu Swiss Bot'u çalıştır
         env:
           UBYS_USERNAME: ${{ secrets.UBYS_USERNAME || secrets.OGRENCI_NO }}
           UBYS_PASSWORD: ${{ secrets.UBYS_PASSWORD || secrets.SIFRE }}
@@ -47,12 +58,45 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.CHAT_ID }}
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          CALENDAR_FACULTY: ${{ vars.CALENDAR_FACULTY || secrets.BOLUM_TIPI }}
+          ENABLE_GRADES: ${{ vars.ENABLE_GRADES }}
+          ENABLE_DINING: ${{ vars.ENABLE_DINING }}
+          ENABLE_CALENDAR: ${{ vars.ENABLE_CALENDAR }}
+          CALENDAR_CATEGORIES: ${{ vars.CALENDAR_CATEGORIES }}
+          CALENDAR_REMINDER_DAYS: ${{ vars.CALENDAR_REMINDER_DAYS }}
+          DINING_NOTIFY_HOUR: ${{ vars.DINING_NOTIFY_HOUR }}
           ALL_SEMESTERS: ${{ vars.ALL_SEMESTERS }}
           UBYS_USER_GROUP_ID: ${{ vars.UBYS_USER_GROUP_ID }}
           NOTIFY_ON_FIRST_RUN: ${{ vars.NOTIFY_ON_FIRST_RUN }}
         run: |
-          if [ "${{ inputs.test_notify }}" = "true" ]; then
+          MODE="${{ inputs.mode }}"
+          NOTIFY="${{ inputs.test_notify }}"
+          if [ -z "$MODE" ]; then
+            MODE="once"
+          fi
+
+          if [ "$MODE" = "once" ] && [ "$NOTIFY" = "true" ]; then
             python -m src.main --test --notify-test
+          elif [ "$MODE" = "test_all" ]; then
+            if [ "$NOTIFY" = "true" ]; then
+              python -m src.main --test --notify-test
+            else
+              python -m src.main --test
+            fi
+          elif [ "$MODE" = "dining" ]; then
+            if [ "$NOTIFY" = "true" ]; then
+              python -m src.main --dining --notify-test
+            else
+              python -m src.main --dining
+            fi
+          elif [ "$MODE" = "calendar" ]; then
+            if [ "$NOTIFY" = "true" ]; then
+              python -m src.main --calendar --notify-test
+            else
+              python -m src.main --calendar
+            fi
+          elif [ "$MODE" = "force_daily" ]; then
+            python -m src.main --once --force-daily
           else
             python -m src.main --once
           fi

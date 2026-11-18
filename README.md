@@ -1,24 +1,28 @@
-# Kastamonu Üniversitesi ÜBYS Not Bildirim Botu (GitHub Actions + Telegram)
+# Kastamonu Üniversitesi Öğrenci Asistanı (Swiss Tool)
 
-Kastamonu Üniversitesi Öğrenci Bilgi Sistemi'ne (`https://ubys.kastamonu.edu.tr`) sürekli girip çıkma zahmetini ortadan kaldıran, **7/24 bulutta (GitHub Actions)** ücretsiz çalışıp yeni bir **Vize, Final, Bütünleme, Kısa Sınav, Ödev, Geçme Notu veya Harf Notu (HBN)** girildiğinde ya da güncellendiğinde telefonunuza anlık **Telegram** bildirimi gönderen hafif ve kararlı otomasyon botu.
+Kastamonu Üniversitesi öğrencileri için **7/24 bulutta (GitHub Actions)** ücretsiz çalışan, Selenium/ChromeDriver gerektirmeyen, hafif ve modüler **Telegram asistanı**:
 
----
-
-## Yenilikler ve Özellikler
-
-- **Selenium/Tarayıcı Gerektirmez:** Eski Selenium + ChromeDriver + `iframe` tabanlı yaklaşım yerine doğrudan hafif HTTP istekleri (`httpx` + `BeautifulSoup`) kullanır. Tarayıcı çökmesi, bekleme süresi veya `iframe` hatası olmadan birkaç saniyede tamamlanır.
-- **Public Repo + Gizli Gist Uyumu:** Notlarınızın durum kaydı asla bu açık (Public) repoya yazılmaz; doğrudan gizli (Secret) **GitHub Gist** içinde `grades_state.json` olarak tutulur (eski `notlar.json` ile çakışmaz).
-- **Tam Not ve Detay Takibi:** Hem ana not tablosunu (`Class/Index`) hem de her dersin detay sayfasını (`ClassDetail`) tarayarak sınav puanı, sınıf ortalaması, sınıf sıralaması, ilan tarihi, geçme notu ve harf notu değişikliklerini yakalar.
-- **Geriye Dönük Secret Desteği:** Mevcut `OGRENCI_NO`, `SIFRE`, `BOT_TOKEN`, `CHAT_ID`, `GIST_ID`, `GIST_TOKEN` secret isimleriyle doğrudan çalışır (yeni `UBYS_USERNAME`, `UBYS_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` isimlerini de destekler).
-- **Akıllı Hata Yönetimi:** Giriş hatasında spam yapmadan tek seferlik uyarı gönderir; geçici ağ hatalarında art arda hata sayacını takip eder.
+1. **ÜBYS Not Bildirimi (`https://ubys.kastamonu.edu.tr`):** Vize, Final, Bütünleme, Kısa Sınav, Ödev, Geçme Notu ve Harf Notu (`HBN`) değişikliklerini, sınıf ortalaması ve sıralamayla birlikte anlık bildirir.
+2. **SKS Yemekhane Menüsü (`https://sks.kastamonu.edu.tr`):** Hafta içi her sabah güncel günün yemek listesini ve yemek başı / toplam kalori bilgisini gönderir.
+3. **Akademik Takvim Takibi (`https://akademiktakvim.kastamonu.edu.tr`):** Yaklaşan sınavlar, kayıt yenileme, ders ekle-sil ve resmî tatiller için **7 / 3 / 1 / 0 gün** kala otomatik hatırlatma, her Pazartesi haftalık özet ve tek tıkla **Google Takvime Ekle** bağlantısı sunar.
 
 ---
 
-## Kurulum ve Etkinleştirme (GitHub Actions)
+## Öne Çıkan Özellikler
 
-### 1. Mevcut Secret Bilgilerini Kontrol Etme
+- **Sıfır Tarayıcı / Yüksek Hız:** Eski Selenium + ChromeDriver + `iframe` yapısı yerine doğrudan resmi sayfa uç noktalarına ve API'lere `httpx` + `BeautifulSoup` ile bağlanır.
+- **Public Repo + Gizli Gist Güvenliği:** Durum verileriniz asla açık (Public) repoya yazılmaz; gizli (Secret) **GitHub Gist** içindeki `grades_state.json` dosyasında tutulur.
+- **Birim Seçenekli Akademik Takvim:** `GENEL` dışında `TIP`, `VET`, `DIS`, `LISANSUSTU`, `TURIZM` fakülte/enstitü özel takvimlerini destekler (`BOLUM_TIPI` secret'ınızla da otomatik uyumludur).
+- **Modül İzolasyonu:** Yemekhane veya Takvim sitesinde geçici bir bakım olsa bile ÜBYS not takibi kesintisiz çalışmaya devam eder.
+- **Geriye Dönük Secret Uyumu:** Mevcut `OGRENCI_NO`, `SIFRE`, `BOT_TOKEN`, `CHAT_ID`, `GIST_ID`, `GIST_TOKEN`, `BOLUM_TIPI` secret isimlerinizle ek ayar yapmadan çalışır.
 
-Reponuzda **Settings → Secrets and variables → Actions** altında aşağıdaki **Repository secrets** değerlerinin tanımlı olduğundan emin olun:
+---
+
+## GitHub Actions Kurulumu
+
+### 1. Repository Secrets
+
+**Settings → Secrets and variables → Actions → Repository secrets** altında şu değerler yer alır:
 
 | Secret Adı (veya Alternatifi) | Açıklama |
 | --- | --- |
@@ -26,35 +30,38 @@ Reponuzda **Settings → Secrets and variables → Actions** altında aşağıda
 | `SIFRE` (veya `UBYS_PASSWORD`) | ÜBYS parolanız |
 | `BOT_TOKEN` (veya `TELEGRAM_BOT_TOKEN`) | `@BotFather`'dan aldığınız Telegram Bot Token'ı |
 | `CHAT_ID` (veya `TELEGRAM_CHAT_ID`) | Bildirim alacak Telegram Chat ID |
-| `GIST_ID` | Not durumunun saklanacağı **Secret (Gizli)** Gist ID'si |
-| `GIST_TOKEN` | `gist` yetkisine sahip GitHub Personal Access Token |
+| `GIST_ID` | Not ve bildirim durumunun saklanacağı **Secret Gist** ID'si |
+| `GIST_TOKEN` | Yalnızca `gist` yetkisine sahip GitHub Personal Access Token |
 
-> **Önemli Gizlilik Notu:** Bu repo **Public (Açık)** olduğu için `GIST_ID` ve `GIST_TOKEN` değerlerinin girili olması önemlidir; aksi hâlde GitHub Actions her çalışmada sıfırdan başlar. Kişisel not durumunuz yalnızca kendi gizli Gist'inizde (`grades_state.json`) saklanır.
+### 2. İsteğe Bağlı Repository Variables
 
-### 2. GitHub Actions'ı Yeniden Aktif Etme ve İlk Test
+**Settings → Secrets and variables → Actions → Variables** sekmesinden davranışları özelleştirebilirsiniz:
 
-Daha önce workflow'u durdurduysanız:
+| Variable Adı | Varsayılan | Açıklama |
+| --- | --- | --- |
+| `ENABLE_GRADES` | `true` | ÜBYS not takibini açar/kapatır |
+| `ENABLE_DINING` | `true` | Hafta içi yemekhane menüsü bildirimini açar/kapatır |
+| `ENABLE_CALENDAR` | `true` | Akademik takvim hatırlatma ve haftalık özetini açar/kapatır |
+| `CALENDAR_FACULTY` | `GENEL` | `GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU`, `TURIZM` (veya `BOLUM_TIPI`) |
+| `CALENDAR_CATEGORIES` | `STUDENT` | `STUDENT` (Ders/Sınav/Kayıt/Tatil/KUZEM/OSD), `ALL` veya virgüllü liste |
+| `CALENDAR_REMINDER_DAYS` | `7,3,1,0` | Etkinlik başlamadan kaç gün önce hatırlatılacağı |
+| `DINING_NOTIFY_HOUR` | `8` | Yemekhane bildiriminin gönderileceği en erken saat (TR saati) |
+| `ALL_SEMESTERS` | `false` | Tüm geçmiş dönem derslerini de tarar |
+| `NOTIFY_ON_FIRST_RUN` | `true` | İlk kurulumda mevcut ders özetini gönderir |
 
-1. Reponuzda **Actions** sekmesine tıklayın.
-2. Sol menüden **Kastamonu ÜBYS Not Takibi** workflow'unu seçin ve gerekirse **"Enable workflow"** butonuna basın.
-3. Sağ üstteki **Run workflow** menüsünü açın:
-   - İlk olarak **`test_notify`** kutucuğunu işaretleyip (`true`) **Run workflow** diyebilirsiniz. Bu işlem ÜBYS'ye bağlanıp mevcut not özetini Telegram'a gönderir ancak Gist durumunu değiştirmez.
-   - Bağlantı sorunsuz çalıştıktan sonra `test_notify` işaretsiz (`false`) şekilde bir kez **Run workflow** çalıştırın. Bu adım Gist üzerinde `grades_state.json` başlangıç kaydını oluşturur ve bildirim takibini başlatır.
+### 3. Actions Üzerinden Manuel Çalıştırma (`workflow_dispatch`)
+
+**Actions → Kastamonu ÜBYS Swiss Bot → Run workflow** menüsünden `mode` seçerek istediğiniz modülü anında test edebilirsiniz:
+
+- `once`: Normal tam çalıştırma (notlar + saat uygunsa günlük yemekhane/takvim). `test_notify: true` ile çalıştırırsanız durum değiştirmeden tüm modülleri test eder.
+- `test_all`: Etkin tüm modülleri test eder (`test_notify: true` ise Telegram'a da gönderir).
+- `dining`: Yalnızca günün/yaklaşan yemekhane menüsünü çeker (`test_notify: true` ise Telegram'a yollar).
+- `calendar`: Yalnızca akademik takvim özetini çeker (`test_notify: true` ise Telegram'a yollar).
+- `force_daily`: Saat veya hafta içi koşuluna bakmadan günlük yemekhane ve takvim özetini Telegram'a gönderir.
 
 ---
 
-## Çalışma Sıklığı
-
-Public repolarda GitHub Actions dakikaları ücretsiz ve sınırsızdır. Varsayılan [check-grades.yml](.github/workflows/check-grades.yml) zamanlaması:
-
-- `*/15 5-22 * * *` → **Türkiye saatiyle 08:00 – 01:59** arasında **her 15 dakikada bir** kontrol yapar.
-- İsterseniz cron satırını `'*/15 * * * *'` yaparak 7/24 çalışmasını sağlayabilirsiniz.
-
-*(İsteğe bağlı: Repository **Variables** bölümüne `ALL_SEMESTERS=true`, `NOTIFY_ON_FIRST_RUN=false` veya çoklu rol varsa `UBYS_USER_GROUP_ID` ekleyebilirsiniz.)*
-
----
-
-## Kendi Bilgisayarınızda, VPS'te veya Docker ile Çalıştırma
+## Yerel Bilgisayarda, VPS'te veya Docker ile Kullanım
 
 ```bash
 python -m venv .venv
@@ -67,17 +74,16 @@ pip install -r requirements.txt
 copy .env.example .env   # Linux/macOS için: cp .env.example .env
 ```
 
-`.env` dosyasını doldurduktan sonra:
+Hızlı CLI komutları:
 
-- **Ekran testi (durumu değiştirmez):** `python -m src.main --test`
-- **Ekran + Telegram test mesajı:** `python -m src.main --test --notify-test`
-- **Tek seferlik gerçek kontrol:** `python -m src.main --once`
+- **Sadece yemekhane menüsünü gör (şifre gerektirmez):** `python -m src.main --dining`
+- **Sadece akademik takvimi gör (şifre gerektirmez):** `python -m src.main --calendar`
+- **Tüm modülleri ekranda test et:** `python -m src.main --test`
+- **Tüm modülleri test edip Telegram'a gönder:** `python -m src.main --test --notify-test`
+- **Tek seferlik tam çalıştırma:** `python -m src.main --once`
+- **Günlük yemekhane ve takvimi zorla gönder:** `python -m src.main --once --force-daily`
 - **Sürekli arka plan döngüsü:** `python -m src.main --loop`
 - **Docker Compose ile:** `docker compose up -d --build`
-
-### Sorun Giderme (`--dump-html`)
-
-ÜBYS arayüzü güncellenirse yerelde `python -m src.main --test --dump-html` komutunu çalıştırarak HTML örneklerini `debug_html/` klasörüne kaydedip inceleyebilirsiniz.
 
 ---
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Optional
 
 
@@ -110,3 +111,38 @@ class GradeChange:
     class_average: Optional[str] = None
     ranking: Optional[str] = None
     announcement_date: Optional[str] = None
+
+
+@dataclass
+class DiningItem:
+    """Yemekhane menüsündeki tekil yemek/çeşit öğesi."""
+
+    name: str
+    calories: Optional[str] = None
+    category: str = ""
+
+
+@dataclass
+class DailyMenu:
+    """Belirli bir güne ait yemekhane menüsü."""
+
+    menu_date: date
+    items: list[DiningItem]
+    total_calories_min: Optional[int] = None
+    total_calories_max: Optional[int] = None
+    source_url: Optional[str] = None
+
+
+@dataclass
+class CalendarEvent:
+    """Kastamonu Üniversitesi Akademik Takvim etkinliği."""
+
+    event_id: str
+    title: str
+    start_date: date
+    end_date: date
+    category: str
+    faculty: str
+    term: str
+    description: str = ""
+    google_calendar_url: Optional[str] = None
