@@ -1,0 +1,58 @@
+name: Kastamonu ÜBYS Not Takibi
+
+on:
+  schedule:
+    # UTC 05:00 - 22:59 arası her 15 dakikada bir (Türkiye saatiyle 08:00 - 01:59)
+    # Public depolarda GitHub Actions dakikaları ücretsiz ve sınırsızdır.
+    # 7/24 kontrol için: '*/15 * * * *'
+    - cron: '*/15 5-22 * * *'
+
+  workflow_dispatch:
+    inputs:
+      test_notify:
+        description: "Test modu: Mevcut not özetini Telegram'a gönder (Gist durumunu değiştirmez)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ubys-grade-check
+  cancel-in-progress: false
+
+jobs:
+  check-grades:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Bağımlılıkları yükle
+        run: pip install -r requirements.txt
+
+      - name: ÜBYS notlarını kontrol et
+        env:
+          UBYS_USERNAME: ${{ secrets.UBYS_USERNAME || secrets.OGRENCI_NO }}
+          UBYS_PASSWORD: ${{ secrets.UBYS_PASSWORD || secrets.SIFRE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.CHAT_ID }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          ALL_SEMESTERS: ${{ vars.ALL_SEMESTERS }}
+          UBYS_USER_GROUP_ID: ${{ vars.UBYS_USER_GROUP_ID }}
+          NOTIFY_ON_FIRST_RUN: ${{ vars.NOTIFY_ON_FIRST_RUN }}
+        run: |
+          if [ "${{ inputs.test_notify }}" = "true" ]; then
+            python -m src.main --test --notify-test
+          else
+            python -m src.main --once
+          fi
