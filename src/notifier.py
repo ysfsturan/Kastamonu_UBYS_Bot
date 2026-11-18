@@ -11,7 +11,16 @@ from typing import Any, Iterable, Optional
 
 import httpx
 
-from .models import CalendarEvent, CourseGrade, DailyMenu, GradeChange
+from .grade_calculator import analyze_course_grades
+from .models import (
+    AttendanceReport,
+    CalendarEvent,
+    CourseGrade,
+    DailyMenu,
+    GradeChange,
+    GradeTargetAnalysis,
+    TranscriptSummary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,12 +160,50 @@ class TelegramNotifier:
             return
 
 
-def format_grade_changes(changes: list[GradeChange], base_url: str) -> str:
+def _format_target_lines(analysis: GradeTargetAnalysis, include_impossible: bool = False) -> list[str]:
+    mw_pct = round(analysis.midterm_weight * 100)
+    fw_pct = round(analysis.final_weight * 100)
+    lines: list[str] = [f"🎯 <b>Final Hedefleri (%{mw_pct}/%{fw_pct}):</b>"]
+
+    has_impossible = False
+    for target in analysis.targets:
+        tag = " (Şartlı)" if target.letter == "DC" else ""
+        if target.status == "guaranteed":
+            lines.append(f"   ✅ <b>{target.letter}{tag}</b> (≥{target.min_total}): Garantili")
+        elif target.status == "achievable":
+            lines.append(
+                f"   • <b>{target.letter}{tag}</b> (≥{target.min_total}): Finalden <code>{target.required_final}</code>+"
+            )
+        else:
+            has_impossible = True
+            if include_impossible:
+                lines.append(f"   ❌ <b>{target.letter}</b> (≥{target.min_total}): İmkansız (100+)")
+
+    if has_impossible:
+        lines.append(
+            f"   ℹ️ <i>Maks. olası ortalama: {analysis.max_possible_total:.2f} ({analysis.max_possible_letter})</i>"
+        )
+    return lines
+
+
+def format_grade_changes(
+    changes: list[GradeChange],
+    base_url: str,
+    courses: Optional[list[CourseGrade]] = None,
+    midterm_weight: float = 0.40,
+    final_weight: float = 0.60,
+    final_min_score: int = 0,
+) -> str:
     """Tespit edilen not değişikliklerini okunaklı Türkçe Telegram mesajına dönüştürür."""
     grouped: OrderedDict[tuple[str, str, str], list[GradeChange]] = OrderedDict()
     for change in changes:
         key = (change.semester, change.course_code, change.course_name)
         grouped.setdefault(key, []).append(change)
+
+    course_map = {
+        (c.semester, c.code, c.name): c
+        for c in (courses or [])
+    }
 
     lines: list[str] = ["🔔 <b>ÜBYS Not Bildirimi</b>", ""]
 
@@ -202,6 +249,22 @@ def format_grade_changes(changes: list[GradeChange], base_url: str) -> str:
                 meta_parts.append(f"İlan: {html.escape(ch.announcement_date)}")
             if meta_parts:
                 lines.append(f"   └ {' | '.join(meta_parts)}")
+
+        course_obj = course_map.get((semester, code, name))
+        if course_obj is not None:
+            analysis, estimate = analyze_course_grades(
+                course_obj,
+                default_midterm_weight=midterm_weight,
+                default_final_weight=final_weight,
+                final_min_score=final_min_score,
+            )
+            if analysis is not None:
+                lines.extend(_format_target_lines(analysis, include_impossible=False))
+            elif estimate is not None:
+                lines.append(
+                    f"🧮 <b>Tahmini Ortalama:</b> <code>{estimate.weighted_total:.2f}</code> "
+                    f"→ <b>{estimate.letter_grade}</b> ({estimate.coefficient:.2f})"
+                )
 
         lines.append("")
 
@@ -441,4 +504,155 @@ def format_calendar_digest(
         lines.append("")
 
     lines.append(f'🔗 <a href="{html.escape(calendar_url, quote=True)}">Akademik Takvim\'e Git</a>')
+    return "\n".join(lines)
+
+
+def format_grade_calculator(analysis: GradeTargetAnalysis) -> str:
+    """Bağımsız final hedef hesaplama sonucunu HTML biçiminde döndürür."""
+    lines = [
+        "🧮 <b>Kastamonu ÜBYS Final Hedef Hesaplayıcı</b>",
+        f"📝 <b>Vize Notunuz:</b> <code>{analysis.midterm_score:g}</code>",
+    ]
+    if analysis.final_min_score > 0:
+        lines.append(f"🚧 <b>Final Alt Barajı:</b> <code>{analysis.final_min_score}</code>")
+    lines.append("")
+    lines.extend(_format_target_lines(analysis, include_impossible=True))
+    return "\n".join(lines)
+
+
+def format_transcript_summary(summary: TranscriptSummary, base_url: str) -> str:
+    """Transkript ve GANO özetini Telegram HTML mesajına dönüştürür."""
+    lines = ["🎓 <b>Kastamonu ÜBYS Transkript Özeti</b>", ""]
+    if summary.gano is not None:
+        lines.append(f"📊 <b>Genel Ortalama (GANO):</b> <code>{summary.gano:.2f}</code>")
+    if summary.total_credit is not None:
+        lines.append(f"📘 <b>Toplam Kredi:</b> <code>{summary.total_credit:g}</code>")
+    if summary.total_ects is not None:
+        lines.append(f"📗 <b>Toplam AKTS:</b> <code>{summary.total_ects:g}</code>")
+
+    if summary.semesters:
+        lines.append("")
+        lines.append("📅 <b>Dönem Ortalamaları:</b>")
+        for sem in summary.semesters:
+            parts: list[str] = []
+            if sem.semester_gpa is not None:
+                parts.append(f"YANO: {sem.semester_gpa:.2f}")
+            if sem.cumulative_gpa is not None:
+                parts.append(f"GANO: {sem.cumulative_gpa:.2f}")
+            if not parts and sem.courses:
+                parts.append(f"{len(sem.courses)} ders")
+            suffix = f" ({' | '.join(parts)})" if parts else ""
+            lines.append(f"• <b>{html.escape(sem.name)}</b>{html.escape(suffix)}")
+
+        latest = summary.semesters[-1]
+        if latest.courses:
+            lines.append("")
+            lines.append(f"📚 <b>Son Dönem ({html.escape(latest.name)}):</b>")
+            for c in latest.courses[:20]:
+                grade_str = html.escape(c.letter_grade or "-")
+                title = f"{c.code} - {c.name}" if c.code else c.name
+                lines.append(f"• {html.escape(title)}: <code>{grade_str}</code>")
+            if len(latest.courses) > 20:
+                lines.append(f"<i>... ve {len(latest.courses) - 20} ders daha.</i>")
+    elif summary.gano is None:
+        lines.append("Transkript verisi bulunamadı.")
+
+    lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def format_gano_change(old_gano: float, new_gano: float, base_url: str) -> str:
+    """GANO değişikliği bildirimi hazırlar."""
+    delta = new_gano - old_gano
+    icon = "📈" if delta >= 0 else "📉"
+    sign = "+" if delta >= 0 else ""
+    lines = [
+        f"🎓 <b>GANO Güncellendi!</b>",
+        "",
+        f"{icon} <b>Genel Ortalama:</b> <code>{old_gano:.2f}</code> → <code>{new_gano:.2f}</code> (<code>{sign}{delta:.2f}</code>)",
+        "",
+        f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>',
+    ]
+    return "\n".join(lines)
+
+
+_ATTENDANCE_ICONS = {
+    "safe": "🟢",
+    "warning": "🟡",
+    "critical": "🔴",
+    "failed": "⛔",
+    "unknown": "⚪",
+}
+
+
+def _fmt_hours(val: Optional[float]) -> str:
+    if val is None:
+        return "-"
+    return f"{val:g}"
+
+
+def _format_attendance_detail_line(report: AttendanceReport) -> str:
+    parts: list[str] = [report.course_type]
+    if report.max_theory_absent is not None and report.max_practice_absent is not None:
+        t_part = f"Teorik: {_fmt_hours(report.used_theory_absent)}/{_fmt_hours(report.max_theory_absent)}"
+        if report.remaining_theory is not None:
+            t_part += f" (Kalan {_fmt_hours(report.remaining_theory)})"
+        u_part = f"Uyg: {_fmt_hours(report.used_practice_absent)}/{_fmt_hours(report.max_practice_absent)}"
+        if report.remaining_practice is not None:
+            u_part += f" (Kalan {_fmt_hours(report.remaining_practice)})"
+        parts.extend([t_part, u_part])
+    elif report.max_total_absent is not None:
+        if report.used_total_absent is not None and report.remaining_total is not None:
+            parts.append(
+                f"Devamsızlık: {_fmt_hours(report.used_total_absent)}/{_fmt_hours(report.max_total_absent)} saat "
+                f"(Kalan: {_fmt_hours(report.remaining_total)} saat)"
+            )
+        else:
+            parts.append(f"Maks. Hak: {_fmt_hours(report.max_total_absent)} saat")
+
+    if report.absent_percent is not None:
+        parts.append(f"Oran: %{report.absent_percent:g}")
+    if report.status and report.status != "Bilinmiyor":
+        parts.append(report.status)
+    return " | ".join(parts)
+
+
+def format_attendance_report(reports: list[AttendanceReport], base_url: str) -> str:
+    """Tüm derslerin devamsızlık hakkı ve risk özetini Telegram HTML mesajına dönüştürür."""
+    lines = ["📋 <b>Devamsızlık Takip Raporu</b>", ""]
+    if not reports:
+        lines.append("Değerlendirilecek ders bulunamadı.")
+    else:
+        for report in reports:
+            icon = _ATTENDANCE_ICONS.get(report.risk_level, "⚪")
+            title = f"{report.course_code} - {report.course_name}" if report.course_code else report.course_name
+            lines.append(f"{icon} <b>{html.escape(title)}</b>")
+            lines.append(f"   └ {html.escape(_format_attendance_detail_line(report))}")
+
+    lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def format_attendance_alerts(
+    alerts: list[tuple[AttendanceReport, Optional[float], Optional[str]]],
+    base_url: str,
+) -> str:
+    """Devamsızlık artışı veya kritik sınır uyarısı için Telegram HTML mesajı üretir."""
+    lines = ["⚠️ <b>Devamsızlık Uyarısı</b>", ""]
+    for report, old_hours, old_status in alerts:
+        icon = _ATTENDANCE_ICONS.get(report.risk_level, "⚠️")
+        title = f"{report.course_code} - {report.course_name}" if report.course_code else report.course_name
+        lines.append(f"{icon} <b>{html.escape(title)}</b>")
+        if old_hours is not None and report.used_total_absent is not None and report.used_total_absent > old_hours:
+            lines.append(
+                f"   └ Kullanılan: <code>{_fmt_hours(old_hours)}</code> → <code>{_fmt_hours(report.used_total_absent)}</code> saat"
+            )
+        elif old_status and report.status != old_status:
+            lines.append(f"   └ Durum: {html.escape(old_status)} → <b>{html.escape(report.status)}</b>")
+        lines.append(f"   └ {html.escape(_format_attendance_detail_line(report))}")
+        lines.append("")
+
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
     return "\n".join(lines)

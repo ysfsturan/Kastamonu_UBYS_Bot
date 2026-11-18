@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import tempfile
@@ -12,6 +13,12 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
+from src.attendance import (
+    build_attendance_snapshot,
+    diff_attendance,
+    evaluate_all_attendance,
+    evaluate_course_attendance,
+)
 from src.calendar_tracker import (
     CalendarError,
     extract_active_term,
@@ -38,15 +45,35 @@ from src.dining import (
     parse_dining_csv,
     tr_title,
 )
+from src.grade_calculator import (
+    analyze_course_grades,
+    calculate_final_targets,
+    estimate_course_grade,
+    score_to_letter,
+)
 from src.main import TR_TZ, run_once
-from src.models import CalendarEvent, CourseGrade, DailyMenu, DiningItem, ExamGrade
+from src.models import (
+    CalendarEvent,
+    CourseGrade,
+    DailyMenu,
+    DiningItem,
+    ExamGrade,
+    TranscriptCourse,
+    TranscriptSemester,
+    TranscriptSummary,
+)
 from src.notifier import (
     TelegramNotifier,
+    format_attendance_alerts,
+    format_attendance_report,
     format_baseline_summary,
     format_calendar_digest,
     format_calendar_reminders,
     format_daily_menu,
+    format_gano_change,
+    format_grade_calculator,
     format_grade_changes,
+    format_transcript_summary,
     split_message,
 )
 from src.ubys_client import LoginError, NetworkError
@@ -61,6 +88,8 @@ from src.ubys_parser import (
     parse_class_detail,
     parse_grades_index,
     parse_sap_id,
+    parse_student_gano,
+    parse_transcript,
 )
 
 SAMPLE_LOGIN_HTML = """
@@ -847,6 +876,7 @@ class SwissToolFlowTests(unittest.TestCase):
             ):
                 ubys_inst = mock_ubys.return_value.__enter__.return_value
                 ubys_inst.fetch_grades.return_value = sample_courses
+                ubys_inst.last_home_gano = None
 
                 # İlk çalıştırma: 1 yemekhane + 1 takvim hatırlatması (7 gün kala) + 1 Pazartesi özeti = 3 mesaj
                 self.assertEqual(run_once(cfg), 0)
@@ -867,8 +897,270 @@ class SwissToolFlowTests(unittest.TestCase):
                 patch("src.main.fetch_calendar_events", side_effect=CalendarError("Takvim geçici hata")),
                 patch("src.main.TelegramNotifier"),
             ):
-                mock_ubys.return_value.__enter__.return_value.fetch_grades.return_value = sample_courses
+                tue_inst = mock_ubys.return_value.__enter__.return_value
+                tue_inst.fetch_grades.return_value = sample_courses
+                tue_inst.last_home_gano = None
                 self.assertEqual(run_once(cfg), 0)
+
+
+class GradeCalculatorTests(unittest.TestCase):
+    def test_vize_100_final_targets_and_baraj(self) -> None:
+        self.assertEqual(score_to_letter(90), ("AA", 4.0))
+        self.assertEqual(score_to_letter(55), ("DC", 1.5))
+        self.assertEqual(score_to_letter(39), ("FF", 0.0))
+
+        analysis = calculate_final_targets(100, midterm_weight=0.40, final_weight=0.60, final_min_score=0)
+        targets = {t.letter: (t.required_final, t.status) for t in analysis.targets}
+        self.assertEqual(targets["DC"], (25, "achievable"))
+        self.assertEqual(targets["CC"], (34, "achievable"))
+        self.assertEqual(targets["CB"], (42, "achievable"))
+        self.assertEqual(targets["BB"], (59, "achievable"))
+        self.assertEqual(targets["BA"], (75, "achievable"))
+        self.assertEqual(targets["AA"], (84, "achievable"))
+
+        # Final alt barajı 50 iken DC/CC/CB en az 50 olmalı
+        baraj = calculate_final_targets(100, final_min_score=50)
+        baraj_map = {t.letter: t.required_final for t in baraj.targets}
+        self.assertEqual(baraj_map["DC"], 50)
+        self.assertEqual(baraj_map["CC"], 50)
+        self.assertEqual(baraj_map["CB"], 50)
+        self.assertEqual(baraj_map["BB"], 59)
+
+        # Vize 20 iken BB/BA/AA imkansız, maks 68.0 (CB)
+        low = calculate_final_targets(20)
+        self.assertEqual(low.max_possible_total, 68.0)
+        self.assertEqual(low.max_possible_letter, "CB")
+        low_map = {t.letter: t.status for t in low.targets}
+        self.assertEqual(low_map["BB"], "impossible")
+        self.assertEqual(low_map["AA"], "impossible")
+        self.assertEqual(low_map["CC"], "achievable")
+
+        calc_msg = format_grade_calculator(analysis)
+        self.assertIn("Finalden <code>34</code>+", calc_msg)
+
+    def test_estimate_and_grade_change_integration(self) -> None:
+        est = estimate_course_grade(80, 70)
+        self.assertEqual(est.weighted_total, 74.0)
+        self.assertEqual(est.letter_grade, "CB")
+        self.assertEqual(est.coefficient, 2.5)
+        self.assertTrue(est.is_passing)
+
+        # Final barajı altında kalan final FF olmalı
+        est_baraj = estimate_course_grade(100, 45, final_min_score=50)
+        self.assertEqual(est_baraj.letter_grade, "FF")
+        self.assertFalse(est_baraj.is_passing)
+
+        course_vize = CourseGrade(
+            semester="2026 - Güz",
+            code="BPBZ201",
+            name="İnternet Programcılığı",
+            exams=[ExamGrade(exam_type="Ara Sınav", name="Vize", score="100")],
+        )
+        changes_vize = diff_courses({}, [course_vize])
+        msg_vize = format_grade_changes(changes_vize, "https://ubys.kastamonu.edu.tr", courses=[course_vize])
+        self.assertIn("Final Hedefleri", msg_vize)
+        self.assertIn("Finalden <code>34</code>+", msg_vize)
+
+        course_both = CourseGrade(
+            semester="2026 - Güz",
+            code="BPBZ201",
+            name="İnternet Programcılığı",
+            exams=[
+                ExamGrade(exam_type="Ara Sınav", name="Vize", score="80"),
+                ExamGrade(exam_type="Yarıyıl Sonu", name="Final", score="70"),
+            ],
+        )
+        changes_both = diff_courses({}, [course_both])
+        msg_both = format_grade_changes(changes_both, "https://ubys.kastamonu.edu.tr", courses=[course_both])
+        self.assertIn("Tahmini Ortalama", msg_both)
+        self.assertIn("74.00", msg_both)
+        self.assertIn("CB", msg_both)
+
+
+class AttendanceTests(unittest.TestCase):
+    def test_theory_practice_mixed_and_risk_levels(self) -> None:
+        # Teorik 3 saat * 14 hafta * 0.30 = 12.6 -> floor 12 saat
+        c_warn = CourseGrade(
+            semester="2026 - Güz",
+            code="BLM101",
+            name="Algoritmalar",
+            theoretical_hours=3.0,
+            practical_hours=0.0,
+            absent_total_hours=10.0,
+            attendance_status="Devamlı",
+        )
+        r_warn = evaluate_course_attendance(c_warn)
+        self.assertEqual(r_warn.max_total_absent, 12.0)
+        self.assertEqual(r_warn.remaining_total, 2.0)
+        self.assertEqual(r_warn.risk_level, "warning")
+
+        c_crit = CourseGrade(
+            semester="2026 - Güz",
+            code="BLM101",
+            name="Algoritmalar",
+            theoretical_hours=3.0,
+            practical_hours=0.0,
+            absent_total_hours=11.0,
+            attendance_status="Devamlı",
+        )
+        self.assertEqual(evaluate_course_attendance(c_crit).risk_level, "critical")
+
+        # Uygulamalı 2 saat * 14 hafta * 0.20 = 5.6 -> floor 5 saat
+        c_prac = CourseGrade(
+            semester="2026 - Güz",
+            code="LAB102",
+            name="Fizik Lab",
+            theoretical_hours=0.0,
+            practical_hours=2.0,
+            absent_total_hours=4.0,
+        )
+        r_prac = evaluate_course_attendance(c_prac)
+        self.assertEqual(r_prac.max_practice_absent, 5.0)
+        self.assertEqual(r_prac.remaining_practice, 1.0)
+        self.assertEqual(r_prac.risk_level, "critical")
+
+        # Karma 2+2 -> Teorik 8, Uygulama 5
+        c_mix = CourseGrade(
+            semester="2026 - Güz",
+            code="KRM202",
+            name="Karma Ders",
+            theoretical_hours=2.0,
+            practical_hours=2.0,
+            absent_theoretical_hours=2.0,
+            absent_practical_hours=1.0,
+        )
+        r_mix = evaluate_course_attendance(c_mix)
+        self.assertEqual(r_mix.max_theory_absent, 8.0)
+        self.assertEqual(r_mix.remaining_theory, 6.0)
+        self.assertEqual(r_mix.max_practice_absent, 5.0)
+        self.assertEqual(r_mix.remaining_practice, 4.0)
+        self.assertEqual(r_mix.risk_level, "safe")
+
+    def test_parse_attendance_columns_and_diff_alerts(self) -> None:
+        html = """
+        <div class="panel panel-default">
+          <div class="panel-heading">2026 - Güz</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Ders Kodu</th>
+                <th>Ders Adı</th>
+                <th>T+U</th>
+                <th>Kredi</th>
+                <th>Devamsızlık</th>
+                <th>Vize</th>
+                <th>Geçme Notu</th>
+                <th>HBN</th>
+                <th>Başarı Durumu</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td rowspan="2"><a href="/AIS/Student/Class/ClassDetail?classId=123">BPBZ201</a></td>
+                <td>İnternet Programcılığı</td>
+                <td>2+2</td>
+                <td>3</td>
+                <td>4 Saat (%10)</td>
+                <td>-</td>
+                <td>0</td>
+                <td>-</td>
+                <td>Devamlı</td>
+              </tr>
+              <tr><td colspan="8">Vize: -</td></tr>
+            </tbody>
+          </table>
+        </div>
+        """
+        courses = parse_grades_index(html)
+        self.assertEqual(len(courses), 1)
+        c = courses[0]
+        self.assertEqual(c.theoretical_hours, 2.0)
+        self.assertEqual(c.practical_hours, 2.0)
+        self.assertEqual(c.absent_total_hours, 4.0)
+        self.assertEqual(c.absent_percent, 10.0)
+        self.assertEqual(c.attendance_status, "Devamlı")
+
+        prev_reports = evaluate_all_attendance(courses)
+        prev_snap = build_attendance_snapshot(prev_reports)
+
+        # Devamsızlık artınca uyarı üretmeli
+        c.absent_total_hours = 11.0
+        new_reports = evaluate_all_attendance([c])
+        alerts = diff_attendance(prev_snap, new_reports)
+        self.assertEqual(len(alerts), 1)
+        alert_msg = format_attendance_alerts(alerts, "https://ubys.kastamonu.edu.tr")
+        self.assertIn("BPBZ201", alert_msg)
+        self.assertIn("4", alert_msg)
+        self.assertIn("11", alert_msg)
+
+        # Aynı durumda tekrar uyarı üretmemeli
+        self.assertEqual(diff_attendance(build_attendance_snapshot(new_reports), new_reports), [])
+
+        rep_msg = format_attendance_report(new_reports, "https://ubys.kastamonu.edu.tr")
+        self.assertIn("Devamsızlık Takip Raporu", rep_msg)
+
+
+class TranscriptTests(unittest.TestCase):
+    def test_parse_transcript_jsm_and_html_fallback_and_gano(self) -> None:
+        student_info = {"StudentId": 1, "Programs": [{"GANO": 3.42}]}
+        info_b64 = base64.b64encode(json.dumps(student_info).encode("utf-8")).decode("ascii")
+        home_html = f'<script>var StudentInfo = JSON.parse(Base64.decode("{info_b64}"));</script>'
+        self.assertEqual(parse_student_gano(home_html), 3.42)
+
+        jsm_payload = {
+            "Transcripts": [
+                {
+                    "GANO": 3.42,
+                    "TotalCredit": 60,
+                    "TotalEcts": 90,
+                    "Semesters": [
+                        {
+                            "SemesterName": "2025-2026 Güz",
+                            "SemesterAverage": 3.30,
+                            "CumulativeAverage": 3.30,
+                            "Courses": [
+                                {"CourseCode": "BLM101", "CourseName": "Programlama I", "Credit": 4, "Ects": 6, "Grade": "AA"},
+                            ],
+                        },
+                        {
+                            "SemesterName": "2025-2026 Bahar",
+                            "SemesterAverage": 3.55,
+                            "CumulativeAverage": 3.42,
+                            "Courses": [
+                                {"CourseCode": "BLM102", "CourseName": "Programlama II", "Credit": 4, "Ects": 6, "Grade": "BA"},
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+        jsm_b64 = base64.b64encode(json.dumps(jsm_payload).encode("utf-8")).decode("ascii")
+        summary = parse_transcript(f'<script>var _jsm = JSON.parse(Base64.decode("{jsm_b64}"));</script>')
+        self.assertEqual(summary.gano, 3.42)
+        self.assertEqual(len(summary.semesters), 2)
+        self.assertEqual(summary.semesters[1].courses[0].letter_grade, "BA")
+
+        msg = format_transcript_summary(summary, "https://ubys.kastamonu.edu.tr")
+        self.assertIn("3.42", msg)
+        self.assertIn("BLM102 - Programlama II", msg)
+
+        gano_msg = format_gano_change(3.30, 3.42, "https://ubys.kastamonu.edu.tr")
+        self.assertIn("+0.12", gano_msg)
+
+        # HTML fallback testi
+        html_fb = """
+        <table id="test">
+          <caption><b>1. Yarıyıl</b></caption>
+          <tbody>
+            <tr><td>MAT101</td><td>Matematik I</td><td>4</td><td>BA</td></tr>
+            <tr><td colspan="3">Dönem Ortalaması</td><td>3,25</td></tr>
+            <tr><td colspan="3">Birikimli Ortalama</td><td>3,25</td></tr>
+          </tbody>
+        </table>
+        """
+        fb_summary = parse_transcript(html_fb)
+        self.assertEqual(fb_summary.gano, 3.25)
+        self.assertEqual(fb_summary.semesters[0].courses[0].letter_grade, "BA")
 
 
 if __name__ == "__main__":

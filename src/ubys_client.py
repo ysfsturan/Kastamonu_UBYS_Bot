@@ -6,11 +6,11 @@ import logging
 import time
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import httpx
 
-from .models import CourseGrade
+from .models import CourseGrade, TranscriptSummary
 from .ubys_parser import (
     ParseError,
     SessionExpiredError,
@@ -19,9 +19,13 @@ from .ubys_parser import (
     extract_login_csrf_token,
     has_active_captcha,
     is_login_page,
+    parse_attendance_partial,
     parse_class_detail,
     parse_grades_index,
     parse_sap_id,
+    parse_student_gano,
+    parse_transcript,
+    parse_transcript_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +78,14 @@ class UBYSClient:
             timeout=timeout,
         )
         self._logged_in = False
+        self._sap_id: Optional[str] = None
+        self._last_home_gano: Optional[float] = None
+        self._transcript_url: Optional[str] = None
+
+    @property
+    def last_home_gano(self) -> Optional[float]:
+        """Ana sayfadan okunan son GANO bilgisini döndürür."""
+        return self._last_home_gano
 
     def __enter__(self) -> UBYSClient:
         return self
@@ -84,6 +96,9 @@ class UBYSClient:
     def close(self) -> None:
         self._client.close()
         self._logged_in = False
+        self._sap_id = None
+        self._last_home_gano = None
+        self._transcript_url = None
 
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -208,20 +223,24 @@ class UBYSClient:
         self._logged_in = True
         return data
 
-    def fetch_grades(
-        self,
-        all_semesters: bool = False,
-        fetch_details: bool = True,
-        request_delay: float = 0.7,
-        dump_dir: Optional[Path] = None,
-    ) -> list[CourseGrade]:
-        """Öğrenci dönem derslerini ve isteğe bağlı detay sınav notlarını çeker."""
-        if not self._logged_in:
-            raise SessionExpiredError("Önce login() çağrılmalıdır.")
+    @staticmethod
+    def _merge_attendance_fields(course: CourseGrade, att: Optional[dict[str, Any]]) -> None:
+        if not att:
+            return
+        for field_name in (
+            "theoretical_hours",
+            "practical_hours",
+            "absent_theoretical_hours",
+            "absent_practical_hours",
+            "absent_total_hours",
+            "absent_percent",
+            "attendance_status",
+        ):
+            val = att.get(field_name)
+            if val is not None and getattr(course, field_name) is None:
+                setattr(course, field_name, val)
 
-        if dump_dir is not None:
-            dump_dir.mkdir(parents=True, exist_ok=True)
-
+    def _fetch_home_metadata(self, dump_dir: Optional[Path] = None) -> str:
         home_resp = self._request("GET", f"{self.base_url}/AIS/Student/Home/Index")
         if is_login_page(home_resp.text, str(home_resp.url)):
             raise SessionExpiredError("Öğrenci ana sayfası alınırken oturum düştü.")
@@ -229,9 +248,31 @@ class UBYSClient:
             raise NetworkError(f"Öğrenci ana sayfası açılamadı: HTTP {home_resp.status_code}")
 
         if dump_dir is not None:
+            dump_dir.mkdir(parents=True, exist_ok=True)
             (dump_dir / "home_index.html").write_text(home_resp.text, encoding="utf-8")
 
-        sap_id = parse_sap_id(home_resp.text)
+        self._sap_id = parse_sap_id(home_resp.text)
+        self._last_home_gano = parse_student_gano(home_resp.text)
+        self._transcript_url = parse_transcript_url(home_resp.text)
+        return home_resp.text
+
+    def fetch_grades(
+        self,
+        all_semesters: bool = False,
+        fetch_details: bool = True,
+        request_delay: float = 0.7,
+        dump_dir: Optional[Path] = None,
+        fetch_attendance_partials: bool = True,
+    ) -> list[CourseGrade]:
+        """Öğrenci dönem derslerini, sınav detaylarını ve devamsızlık verilerini çeker."""
+        if not self._logged_in:
+            raise SessionExpiredError("Önce login() çağrılmalıdır.")
+
+        if dump_dir is not None:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+
+        self._fetch_home_metadata(dump_dir=dump_dir)
+        sap_id = self._sap_id
 
         params: dict[str, str] = {"history": "true" if all_semesters else "false"}
         if sap_id:
@@ -301,6 +342,24 @@ class UBYSClient:
                         course.instructor = detail["instructor"]
                     if detail["class_average"]:
                         course.class_average = detail["class_average"]
+                    self._merge_attendance_fields(course, detail.get("attendance"))
+
+                    partial_url = detail.get("attendance_partial_url")
+                    if (
+                        fetch_attendance_partials
+                        and partial_url
+                        and course.absent_total_hours is None
+                        and course.absent_theoretical_hours is None
+                    ):
+                        try:
+                            if request_delay > 0:
+                                time.sleep(min(0.3, request_delay))
+                            resolved_partial = urljoin(f"{self.base_url}/", str(partial_url))
+                            p_resp = self._request("GET", resolved_partial)
+                            if p_resp.status_code < 400 and not is_login_page(p_resp.text, str(p_resp.url)):
+                                self._merge_attendance_fields(course, parse_attendance_partial(p_resp.text))
+                        except Exception as p_exc:
+                            logger.debug("Devamsızlık alt sekmesi okunamadı (%s): %s", course.code, p_exc)
                 except SessionExpiredError:
                     raise
                 except Exception as exc:
@@ -313,6 +372,52 @@ class UBYSClient:
                     )
 
         return courses
+
+    def fetch_transcript(self, dump_dir: Optional[Path] = None) -> TranscriptSummary:
+        """Öğrenci transkriptini ve GANO özetini çeker."""
+        if not self._logged_in:
+            raise SessionExpiredError("Önce login() çağrılmalıdır.")
+
+        if self._transcript_url is None and self._last_home_gano is None:
+            self._fetch_home_metadata(dump_dir=dump_dir)
+
+        candidates: list[str] = []
+        if self._transcript_url:
+            candidates.append(urljoin(f"{self.base_url}/", self._transcript_url))
+        if self._sap_id:
+            sap_q = quote(self._sap_id, safe="")
+            candidates.append(f"{self.base_url}/AIS/Student/Transcript/Index?sapId={sap_q}")
+            candidates.append(f"{self.base_url}/AIS/Student/Transkript/Index?sapId={sap_q}")
+        candidates.append(f"{self.base_url}/AIS/Student/Transcript/Index")
+        candidates.append(f"{self.base_url}/AIS/Student/Transkript/Index")
+
+        seen_urls: set[str] = set()
+        last_status: Optional[int] = None
+        for url in candidates:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            resp = self._request("GET", url)
+            if is_login_page(resp.text, str(resp.url)):
+                raise SessionExpiredError("Transkript alınırken oturum düştü.")
+            last_status = resp.status_code
+            if resp.status_code >= 400:
+                continue
+
+            if dump_dir is not None:
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                (dump_dir / "transcript.html").write_text(resp.text, encoding="utf-8")
+
+            summary = parse_transcript(resp.text)
+            if summary.gano is None and self._last_home_gano is not None:
+                summary.gano = self._last_home_gano
+            if summary.semesters or summary.gano is not None:
+                return summary
+
+        if last_status is not None and last_status >= 400:
+            raise NetworkError(f"Transkript sayfası açılamadı: HTTP {last_status}")
+        return TranscriptSummary(gano=self._last_home_gano)
 
 
 def _safe_int(value: Any) -> Optional[int]:

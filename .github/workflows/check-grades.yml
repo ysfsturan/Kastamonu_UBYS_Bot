@@ -19,9 +19,11 @@ on:
           - test_all
           - dining
           - calendar
+          - transcript
+          - attendance
           - force_daily
       test_notify:
-        description: "Telegram'a test bildirimi gönder (once ile test_all çalıştırır; test_all/dining/calendar ile bildirimi açar)"
+        description: "Telegram'a test bildirimi gönder (once ile test_all çalıştırır; diğer kiplerde bildirimi açar)"
         required: false
         type: boolean
         default: false
@@ -62,6 +64,14 @@ jobs:
           ENABLE_GRADES: ${{ vars.ENABLE_GRADES }}
           ENABLE_DINING: ${{ vars.ENABLE_DINING }}
           ENABLE_CALENDAR: ${{ vars.ENABLE_CALENDAR }}
+          ENABLE_ATTENDANCE: ${{ vars.ENABLE_ATTENDANCE }}
+          ENABLE_TRANSCRIPT: ${{ vars.ENABLE_TRANSCRIPT }}
+          MIDTERM_WEIGHT: ${{ vars.MIDTERM_WEIGHT }}
+          FINAL_WEIGHT: ${{ vars.FINAL_WEIGHT }}
+          FINAL_MIN_SCORE: ${{ vars.FINAL_MIN_SCORE }}
+          SEMESTER_WEEKS: ${{ vars.SEMESTER_WEEKS }}
+          THEORY_MIN_ATTENDANCE: ${{ vars.THEORY_MIN_ATTENDANCE }}
+          PRACTICE_MIN_ATTENDANCE: ${{ vars.PRACTICE_MIN_ATTENDANCE }}
           CALENDAR_CATEGORIES: ${{ vars.CALENDAR_CATEGORIES }}
           CALENDAR_REMINDER_DAYS: ${{ vars.CALENDAR_REMINDER_DAYS }}
           DINING_NOTIFY_HOUR: ${{ vars.DINING_NOTIFY_HOUR }}
@@ -94,6 +104,18 @@ jobs:
               python -m src.main --calendar --notify-test
             else
               python -m src.main --calendar
+            fi
+          elif [ "$MODE" = "transcript" ]; then
+            if [ "$NOTIFY" = "true" ]; then
+              python -m src.main --transcript --notify-test
+            else
+              python -m src.main --transcript
+            fi
+          elif [ "$MODE" = "attendance" ]; then
+            if [ "$NOTIFY" = "true" ]; then
+              python -m src.main --attendance --notify-test
+            else
+              python -m src.main --attendance
             fi
           elif [ "$MODE" = "force_daily" ]; then
             python -m src.main --once --force-daily

@@ -12,6 +12,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from .attendance import (
+    build_attendance_snapshot,
+    diff_attendance,
+    evaluate_all_attendance,
+)
 from .calendar_tracker import (
     CalendarError,
     fetch_calendar_events,
@@ -34,17 +39,30 @@ from .dining import (
     get_menu_for_date,
     get_next_menu,
 )
-from .models import CalendarEvent, CourseGrade, DailyMenu
+from .grade_calculator import analyze_course_grades, calculate_final_targets
+from .models import (
+    AttendanceReport,
+    CalendarEvent,
+    CourseGrade,
+    DailyMenu,
+    GradeTargetAnalysis,
+    TranscriptSummary,
+)
 from .notifier import (
     TelegramNotifier,
+    format_attendance_alerts,
+    format_attendance_report,
     format_baseline_summary,
     format_calendar_digest,
     format_calendar_reminders,
     format_daily_menu,
     format_error_alert,
+    format_gano_change,
+    format_grade_calculator,
     format_grade_changes,
     format_test_summary,
     format_tr_date,
+    format_transcript_summary,
 )
 from .ubys_client import (
     CaptchaRequiredError,
@@ -92,7 +110,7 @@ def now_tr() -> datetime:
     return datetime.now(TR_TZ)
 
 
-def _print_courses_table(courses: list[CourseGrade]) -> None:
+def _print_courses_table(courses: list[CourseGrade], config: Optional[Config] = None) -> None:
     if not courses:
         print("Hiç ders bulunamadı.")
         return
@@ -111,6 +129,8 @@ def _print_courses_table(courses: list[CourseGrade]) -> None:
             for exam in course.exams:
                 score_str = exam.score if exam.score is not None else "-"
                 extras: list[str] = []
+                if exam.weight is not None:
+                    extras.append(f"Etki: %{round(exam.weight * 100)}")
                 if exam.class_average:
                     extras.append(f"Sınıf Ort: {exam.class_average}")
                 if exam.ranking:
@@ -133,6 +153,84 @@ def _print_courses_table(courses: list[CourseGrade]) -> None:
             summary_parts.append(f"Genel Ort: {course.class_average}")
         if summary_parts:
             print(f"  [{' | '.join(summary_parts)}]")
+
+        if config is not None:
+            analysis, estimate = analyze_course_grades(
+                course,
+                default_midterm_weight=config.midterm_weight,
+                default_final_weight=config.final_weight,
+                final_min_score=config.final_min_score,
+            )
+            if analysis is not None:
+                targets_txt = ", ".join(
+                    f"{t.letter}:{'Garanti' if t.status == 'guaranteed' else str(t.required_final) + '+'}"
+                    for t in analysis.targets
+                    if t.status != "impossible"
+                )
+                if targets_txt:
+                    print(f"  Final Hedefleri: {targets_txt} (Maks: {analysis.max_possible_total:.2f})")
+            elif estimate is not None:
+                print(
+                    f"  Tahmini Ortalama: {estimate.weighted_total:.2f} -> {estimate.letter_grade} ({estimate.coefficient:.2f})"
+                )
+
+
+def _print_grade_calculator(analysis: GradeTargetAnalysis) -> None:
+    mw_pct = round(analysis.midterm_weight * 100)
+    fw_pct = round(analysis.final_weight * 100)
+    print(f"\n=== Final Hedef Hesaplayıcı (Vize: {analysis.midterm_score:g} | %{mw_pct}/%{fw_pct}) ===")
+    if analysis.final_min_score > 0:
+        print(f"Final alt barajı: {analysis.final_min_score}")
+    for target in analysis.targets:
+        tag = " (Şartlı)" if target.letter == "DC" else ""
+        if target.status == "guaranteed":
+            req_str = "Garantili (0+)"
+        elif target.status == "achievable":
+            req_str = f"Finalden en az {target.required_final}"
+        else:
+            req_str = "İmkansız (100 üzeri gerekir)"
+        print(f"  • {target.letter}{tag} (≥{target.min_total} | {target.coefficient:.2f}): {req_str}")
+    print(f"  Maksimum olası ortalama: {analysis.max_possible_total:.2f} ({analysis.max_possible_letter})")
+
+
+def _print_attendance_reports(reports: list[AttendanceReport]) -> None:
+    print("\n=== Devamsızlık Takip Raporu ===")
+    if not reports:
+        print("Değerlendirilecek ders bulunamadı.")
+        return
+    for report in reports:
+        title = f"{report.course_code} - {report.course_name}" if report.course_code else report.course_name
+        print(f"• [{report.risk_level.upper()}] {title} ({report.course_type})")
+        if report.max_theory_absent is not None and report.max_practice_absent is not None:
+            print(
+                f"  Teorik: {report.used_theory_absent if report.used_theory_absent is not None else '-'}/{report.max_theory_absent:g}"
+                f" (Kalan: {report.remaining_theory if report.remaining_theory is not None else '-'}) | "
+                f"Uygulama: {report.used_practice_absent if report.used_practice_absent is not None else '-'}/{report.max_practice_absent:g}"
+                f" (Kalan: {report.remaining_practice if report.remaining_practice is not None else '-'})"
+            )
+        elif report.max_total_absent is not None:
+            used_str = f"{report.used_total_absent:g}" if report.used_total_absent is not None else "-"
+            rem_str = f"{report.remaining_total:g}" if report.remaining_total is not None else "-"
+            print(f"  Devamsızlık: {used_str}/{report.max_total_absent:g} saat (Kalan: {rem_str} saat)")
+        if report.absent_percent is not None or report.status != "Bilinmiyor":
+            pct_str = f" | Oran: %{report.absent_percent:g}" if report.absent_percent is not None else ""
+            print(f"  Durum: {report.status}{pct_str}")
+
+
+def _print_transcript_summary(summary: TranscriptSummary) -> None:
+    print("\n=== Transkript Özeti ===")
+    if summary.gano is not None:
+        print(f"GANO: {summary.gano:.2f}")
+    if summary.total_credit is not None:
+        print(f"Toplam Kredi: {summary.total_credit:g}")
+    if summary.total_ects is not None:
+        print(f"Toplam AKTS: {summary.total_ects:g}")
+    for sem in summary.semesters:
+        gpa_str = f" | YANO: {sem.semester_gpa:.2f}" if sem.semester_gpa is not None else ""
+        cum_str = f" | GANO: {sem.cumulative_gpa:.2f}" if sem.cumulative_gpa is not None else ""
+        print(f"\n• {sem.name}{gpa_str}{cum_str}")
+        for c in sem.courses:
+            print(f"  - {c.code} {c.name}: {c.letter_grade or '-'}")
 
 
 def _print_dining_menu(menu: Optional[DailyMenu], is_next_preview: bool = False) -> None:
@@ -237,9 +335,10 @@ def _run_grades_module(
     config: Config,
     state: dict[str, Any],
     dump_html: bool = False,
-) -> tuple[bool, bool, dict[str, Any]]:
-    """ÜBYS not kontrolünü çalıştırır -> (başarılı_mı, durum_değişti_mi, güncel_state)."""
+) -> tuple[bool, bool, dict[str, Any], list[CourseGrade], Optional[float]]:
+    """ÜBYS not kontrolünü çalıştırır -> (başarılı_mı, durum_değişti_mi, güncel_state, dersler, gano)."""
     dump_dir = Path("debug_html") if dump_html else None
+    last_home_gano: Optional[float] = None
 
     try:
         with UBYSClient(base_url=config.ubys_base_url) as client:
@@ -256,21 +355,29 @@ def _run_grades_module(
                 request_delay=config.request_delay_seconds,
                 dump_dir=dump_dir,
             )
+            raw_gano = client.last_home_gano
+            last_home_gano = float(raw_gano) if isinstance(raw_gano, (int, float)) else None
             logger.info("Toplam %d ders çekildi.", len(courses))
 
     except (LoginError, TwoFactorRequiredError, CaptchaRequiredError) as exc:
         logger.error("Kimlik doğrulama / güvenlik hatası: %s", exc)
-        return False, True, _apply_error_to_state(
-            config, state, exc, immediate_alert_title="ÜBYS Giriş / Doğrulama Hatası"
+        return (
+            False,
+            True,
+            _apply_error_to_state(
+                config, state, exc, immediate_alert_title="ÜBYS Giriş / Doğrulama Hatası"
+            ),
+            [],
+            None,
         )
 
     except (NetworkError, ParseError, SessionExpiredError, UBYSError) as exc:
         logger.error("ÜBYS veri çekme hatası: %s", exc)
-        return False, True, _apply_error_to_state(config, state, exc)
+        return False, True, _apply_error_to_state(config, state, exc), [], None
 
     except Exception as exc:
         logger.exception("ÜBYS kontrolünde beklenmeyen hata: %s", exc)
-        return False, True, _apply_error_to_state(config, state, exc)
+        return False, True, _apply_error_to_state(config, state, exc), [], None
 
     updated = copy.deepcopy(state)
     is_first_run = not updated.get("baseline_initialized", False)
@@ -280,7 +387,7 @@ def _run_grades_module(
         if config.notify_on_first_run:
             if not _send_telegram_safe(config, format_baseline_summary(courses)):
                 logger.error("Başlangıç özeti Telegram'a gönderilemedi; not durumu güncellenmedi.")
-                return False, False, state
+                return False, False, state, courses, last_home_gano
             logger.info("Başlangıç özeti Telegram'a gönderildi.")
 
         updated["baseline_initialized"] = True
@@ -288,15 +395,23 @@ def _run_grades_module(
         updated["consecutive_errors"] = 0
         updated["last_error_alert"] = None
         updated["courses"] = build_course_snapshot(courses)
-        return True, True, updated
+        return True, True, updated, courses, last_home_gano
 
     prev_courses = updated.get("courses") or {}
     changes = diff_courses(prev_courses, courses)
     if changes:
         logger.info("%d adet yeni not/durum değişikliği tespit edildi!", len(changes))
-        if not _send_telegram_safe(config, format_grade_changes(changes, config.ubys_base_url)):
+        msg = format_grade_changes(
+            changes,
+            config.ubys_base_url,
+            courses=courses,
+            midterm_weight=config.midterm_weight,
+            final_weight=config.final_weight,
+            final_min_score=config.final_min_score,
+        )
+        if not _send_telegram_safe(config, msg):
             logger.error("Not bildirimi Telegram'a gönderilemedi; bir sonraki kontrolde tekrar denenecek.")
-            return False, False, state
+            return False, False, state, courses, last_home_gano
         logger.info("Not bildirimi Telegram'a gönderildi.")
     else:
         logger.info("Yeni not değişikliği bulunamadı.")
@@ -306,7 +421,7 @@ def _run_grades_module(
     updated["consecutive_errors"] = 0
     updated["last_error_alert"] = None
     updated["courses"] = build_course_snapshot(courses, previous_courses=prev_courses)
-    return True, True, updated
+    return True, True, updated, courses, last_home_gano
 
 
 def _run_dining_module(
@@ -520,11 +635,97 @@ def run_calendar_preview(config: Config, notify_test: bool = False) -> int:
     return 0
 
 
+def run_transcript_preview(
+    config: Config,
+    notify_test: bool = False,
+    dump_html: bool = False,
+) -> int:
+    """ÜBYS transkript ve GANO özetini çekip ekrana (ve isteğe bağlı Telegram'a) yazdırır."""
+    dump_dir = Path("debug_html") if dump_html else None
+    try:
+        with UBYSClient(base_url=config.ubys_base_url) as client:
+            client.login(
+                username=config.ubys_username,
+                password=config.ubys_password,
+                user_group_id=config.ubys_user_group_id,
+            )
+            summary = client.fetch_transcript(dump_dir=dump_dir)
+    except Exception as exc:
+        logger.error("Transkript çekilemedi: %s", exc)
+        return 1
+
+    _print_transcript_summary(summary)
+    if notify_test:
+        if not _send_telegram_safe(config, format_transcript_summary(summary, config.ubys_base_url)):
+            return 1
+        logger.info("Transkript özeti Telegram'a gönderildi.")
+    return 0
+
+
+def run_attendance_preview(
+    config: Config,
+    notify_test: bool = False,
+    dump_html: bool = False,
+) -> int:
+    """Aktif dönem derslerinin devamsızlık raporunu ekrana (ve isteğe bağlı Telegram'a) yazdırır."""
+    dump_dir = Path("debug_html") if dump_html else None
+    try:
+        with UBYSClient(base_url=config.ubys_base_url) as client:
+            client.login(
+                username=config.ubys_username,
+                password=config.ubys_password,
+                user_group_id=config.ubys_user_group_id,
+            )
+            courses = client.fetch_grades(
+                all_semesters=False,
+                fetch_details=config.fetch_class_details,
+                request_delay=config.request_delay_seconds,
+                dump_dir=dump_dir,
+            )
+    except Exception as exc:
+        logger.error("Devamsızlık verileri çekilemedi: %s", exc)
+        return 1
+
+    reports = evaluate_all_attendance(
+        courses,
+        semester_weeks=config.semester_weeks,
+        theory_min_pct=config.theory_min_attendance,
+        practice_min_pct=config.practice_min_attendance,
+    )
+    _print_attendance_reports(reports)
+    if notify_test:
+        if not _send_telegram_safe(config, format_attendance_report(reports, config.ubys_base_url)):
+            return 1
+        logger.info("Devamsızlık raporu Telegram'a gönderildi.")
+    return 0
+
+
+def run_calc_preview(config: Config, midterm_score: float, notify_test: bool = False) -> int:
+    """Verilen vize notuna göre final hedeflerini hesaplar ve yazdırır."""
+    if midterm_score < 0 or midterm_score > 100:
+        logger.error("Vize notu 0 ile 100 arasında olmalıdır (verilen: %s).", midterm_score)
+        return 2
+
+    analysis = calculate_final_targets(
+        midterm_score=midterm_score,
+        midterm_weight=config.midterm_weight,
+        final_weight=config.final_weight,
+        final_min_score=config.final_min_score,
+    )
+    _print_grade_calculator(analysis)
+    if notify_test:
+        if not _send_telegram_safe(config, format_grade_calculator(analysis)):
+            return 1
+        logger.info("Final hesaplama özeti Telegram'a gönderildi.")
+    return 0
+
+
 def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = False) -> int:
     overall_ok = True
     dump_dir = Path("debug_html") if dump_html else None
 
     if config.enable_grades:
+        transcript_summary: Optional[TranscriptSummary] = None
         try:
             with UBYSClient(base_url=config.ubys_base_url) as client:
                 logger.info("Kastamonu ÜBYS'ye giriş yapılıyor (%s)...", config.ubys_base_url)
@@ -539,10 +740,36 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                     request_delay=config.request_delay_seconds,
                     dump_dir=dump_dir,
                 )
-            _print_courses_table(courses)
+                if config.enable_transcript:
+                    try:
+                        transcript_summary = client.fetch_transcript(dump_dir=dump_dir)
+                    except Exception as t_exc:
+                        logger.warning("Transkript alınamadı: %s", t_exc)
+
+            _print_courses_table(courses, config=config)
             if notify_test:
                 if not _send_telegram_safe(config, format_test_summary(courses)):
                     overall_ok = False
+
+            if config.enable_attendance and courses:
+                reports = evaluate_all_attendance(
+                    courses,
+                    semester_weeks=config.semester_weeks,
+                    theory_min_pct=config.theory_min_attendance,
+                    practice_min_pct=config.practice_min_attendance,
+                )
+                _print_attendance_reports(reports)
+                if notify_test:
+                    if not _send_telegram_safe(config, format_attendance_report(reports, config.ubys_base_url)):
+                        overall_ok = False
+
+            if transcript_summary is not None:
+                _print_transcript_summary(transcript_summary)
+                if notify_test:
+                    if not _send_telegram_safe(
+                        config, format_transcript_summary(transcript_summary, config.ubys_base_url)
+                    ):
+                        overall_ok = False
         except Exception as exc:
             logger.error("ÜBYS testi başarısız: %s", exc)
             overall_ok = False
@@ -595,9 +822,11 @@ def run_once(
 
     grades_ok = True
     state_dirty = False
+    courses: list[CourseGrade] = []
+    last_home_gano: Optional[float] = None
 
     if config.enable_grades:
-        grades_ok, grades_dirty, working_state = _run_grades_module(
+        grades_ok, grades_dirty, working_state, courses, last_home_gano = _run_grades_module(
             config,
             working_state,
             dump_html=dump_html,
@@ -607,6 +836,33 @@ def run_once(
 
     current_dt = now_tr()
     swiss_state = dict(working_state.get("swiss_tool") or {})
+
+    if grades_ok and courses and config.enable_attendance:
+        reports = evaluate_all_attendance(
+            courses,
+            semester_weeks=config.semester_weeks,
+            theory_min_pct=config.theory_min_attendance,
+            practice_min_pct=config.practice_min_attendance,
+        )
+        prev_attendance = swiss_state.get("attendance")
+        if isinstance(prev_attendance, dict):
+            alerts = diff_attendance(prev_attendance, reports)
+            if alerts:
+                _send_telegram_safe(config, format_attendance_alerts(alerts, config.ubys_base_url))
+        swiss_state["attendance"] = build_attendance_snapshot(reports)
+        working_state["swiss_tool"] = swiss_state
+        state_dirty = True
+
+    if grades_ok and config.enable_transcript and last_home_gano is not None:
+        prev_gano = swiss_state.get("last_gano")
+        if prev_gano is not None and abs(float(last_home_gano) - float(prev_gano)) >= 0.005:
+            _send_telegram_safe(
+                config,
+                format_gano_change(float(prev_gano), float(last_home_gano), config.ubys_base_url),
+            )
+        swiss_state["last_gano"] = float(last_home_gano)
+        working_state["swiss_tool"] = swiss_state
+        state_dirty = True
 
     dining_ok = True
     if config.enable_dining:
@@ -690,10 +946,26 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Yalnızca akademik takvim özetini gösterir (ÜBYS şifresi gerektirmez).",
     )
+    mode_group.add_argument(
+        "--transcript",
+        action="store_true",
+        help="ÜBYS transkript ve GANO özetini gösterir (state dosyasını değiştirmez).",
+    )
+    mode_group.add_argument(
+        "--attendance",
+        action="store_true",
+        help="Aktif derslerin devamsızlık haklarını ve kalan saatleri gösterir (state değiştirmez).",
+    )
+    mode_group.add_argument(
+        "--calc",
+        type=float,
+        metavar="VIZE_NOTU",
+        help="Girilen vize notuna göre finalden gereken puanları hesaplar (çevrimdışı çalışır).",
+    )
     parser.add_argument(
         "--notify-test",
         action="store_true",
-        help="--test, --dining veya --calendar ile Telegram'a test mesajı gönderir.",
+        help="--test, --dining, --calendar, --transcript, --attendance veya --calc ile Telegram'a gönderir.",
     )
     parser.add_argument(
         "--force-daily",
@@ -712,9 +984,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     _configure_logging()
     args = parse_args(argv)
 
-    is_preview_cmd = args.test or args.dining or args.calendar
+    is_preview_cmd = (
+        args.test
+        or args.dining
+        or args.calendar
+        or args.transcript
+        or args.attendance
+        or (args.calc is not None)
+    )
     require_telegram = bool(args.notify_test or not is_preview_cmd)
-    require_ubys = False if (args.dining or args.calendar) else None
+    if args.calc is not None or args.dining or args.calendar:
+        require_ubys: Optional[bool] = False
+    elif args.transcript or args.attendance:
+        require_ubys = True
+    else:
+        require_ubys = None
 
     try:
         config = load_config(
@@ -725,10 +1009,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("%s", exc)
         return 2
 
+    if args.calc is not None:
+        return run_calc_preview(config, args.calc, notify_test=args.notify_test)
     if args.dining:
         return run_dining_preview(config, notify_test=args.notify_test)
     if args.calendar:
         return run_calendar_preview(config, notify_test=args.notify_test)
+    if args.transcript:
+        return run_transcript_preview(config, notify_test=args.notify_test, dump_html=args.dump_html)
+    if args.attendance:
+        return run_attendance_preview(config, notify_test=args.notify_test, dump_html=args.dump_html)
     if args.test:
         return run_once(
             config,

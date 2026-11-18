@@ -88,6 +88,17 @@ def _validate_http_url(raw: str, name: str) -> str:
     return url
 
 
+def _parse_weight(raw: Optional[str], default: float, name: str) -> float:
+    if raw is None or raw.strip() == "":
+        return default
+    val = _parse_float(raw, default, name, minimum=0.0)
+    if val > 1.0:
+        val = val / 100.0
+    if val <= 0.0 or val >= 1.0:
+        raise ConfigError(f"'{name}' 0 ile 1 (veya 1 ile 99) arasında olmalıdır: {raw!r}")
+    return val
+
+
 @dataclass(frozen=True)
 class Config:
     """Uygulama yapılandırma ayarları."""
@@ -111,6 +122,14 @@ class Config:
     enable_grades: bool = True
     enable_dining: bool = True
     enable_calendar: bool = True
+    enable_attendance: bool = True
+    enable_transcript: bool = True
+    midterm_weight: float = 0.40
+    final_weight: float = 0.60
+    final_min_score: int = 0
+    semester_weeks: int = 14
+    theory_min_attendance: int = 70
+    practice_min_attendance: int = 80
     sks_url: str = "https://sks.kastamonu.edu.tr/"
     dining_sheet_url: Optional[str] = None
     dining_notify_hour: int = 8
@@ -134,7 +153,16 @@ def load_config(
     enable_grades = _parse_bool(os.getenv("ENABLE_GRADES"), True, "ENABLE_GRADES")
     enable_dining = _parse_bool(os.getenv("ENABLE_DINING"), True, "ENABLE_DINING")
     enable_calendar = _parse_bool(os.getenv("ENABLE_CALENDAR"), True, "ENABLE_CALENDAR")
+    enable_attendance = _parse_bool(os.getenv("ENABLE_ATTENDANCE"), True, "ENABLE_ATTENDANCE")
+    enable_transcript = _parse_bool(os.getenv("ENABLE_TRANSCRIPT"), True, "ENABLE_TRANSCRIPT")
     needs_ubys = enable_grades if require_ubys is None else require_ubys
+
+    midterm_weight = _parse_weight(os.getenv("MIDTERM_WEIGHT"), 0.40, "MIDTERM_WEIGHT")
+    final_weight = _parse_weight(os.getenv("FINAL_WEIGHT"), 0.60, "FINAL_WEIGHT")
+    if abs((midterm_weight + final_weight) - 1.0) > 0.01:
+        raise ConfigError(
+            f"MIDTERM_WEIGHT ({midterm_weight}) + FINAL_WEIGHT ({final_weight}) toplamı 1.0 (veya %100) olmalıdır."
+        )
 
     ubys_username = (os.getenv("UBYS_USERNAME") or os.getenv("OGRENCI_NO") or "").strip()
     ubys_password = (os.getenv("UBYS_PASSWORD") or os.getenv("SIFRE") or "").strip()
@@ -217,6 +245,22 @@ def load_config(
         enable_grades=enable_grades,
         enable_dining=enable_dining,
         enable_calendar=enable_calendar,
+        enable_attendance=enable_attendance,
+        enable_transcript=enable_transcript,
+        midterm_weight=midterm_weight,
+        final_weight=final_weight,
+        final_min_score=_parse_int(
+            os.getenv("FINAL_MIN_SCORE"), 0, "FINAL_MIN_SCORE", minimum=0, maximum=100
+        ),
+        semester_weeks=_parse_int(
+            os.getenv("SEMESTER_WEEKS"), 14, "SEMESTER_WEEKS", minimum=1, maximum=52
+        ),
+        theory_min_attendance=_parse_int(
+            os.getenv("THEORY_MIN_ATTENDANCE"), 70, "THEORY_MIN_ATTENDANCE", minimum=1, maximum=100
+        ),
+        practice_min_attendance=_parse_int(
+            os.getenv("PRACTICE_MIN_ATTENDANCE"), 80, "PRACTICE_MIN_ATTENDANCE", minimum=1, maximum=100
+        ),
         sks_url=sks_url,
         dining_sheet_url=dining_sheet_url,
         dining_notify_hour=_parse_int(

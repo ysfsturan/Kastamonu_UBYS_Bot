@@ -10,7 +10,13 @@ from urllib.parse import unquote
 
 from bs4 import BeautifulSoup, Tag
 
-from .models import CourseGrade, ExamGrade
+from .models import (
+    CourseGrade,
+    ExamGrade,
+    TranscriptCourse,
+    TranscriptSemester,
+    TranscriptSummary,
+)
 
 
 class UBYSError(Exception):
@@ -262,12 +268,23 @@ def _map_grade_table_columns(table: Tag) -> dict[str, int]:
 
     mapped: dict[str, int] = {}
     for idx, title in enumerate(headers):
+        compact = title.replace(" ", "")
         if "ders kodu" in title or title == "kodu" or title == "kod":
             mapped.setdefault("code", idx)
         elif "ders adı" in title or "dersin adı" in title or title == "ders":
             mapped.setdefault("name", idx)
+        elif "t+u" in compact or "t/u" in compact or "ders saati" in title or title == "saat":
+            mapped.setdefault("tu_hours", idx)
+        elif title == "t" or "teorik" in title:
+            mapped.setdefault("theory", idx)
+        elif title == "u" or "uygulama" in title or "lab" in title:
+            mapped.setdefault("practice", idx)
         elif "kredi" in title or "ul. kr" in title:
             mapped.setdefault("credit", idx)
+        elif "devam durumu" in title:
+            mapped.setdefault("attendance_status", idx)
+        elif "devamsızlık" in title or "devamsizlik" in title:
+            mapped.setdefault("absence", idx)
         elif "geçme" in title or "başarı notu" in title:
             mapped.setdefault("passing_grade", idx)
         elif "hbn" in title or "harf" in title:
@@ -347,6 +364,61 @@ def _cell_text(cells: list[Tag], index: int) -> str:
     return ""
 
 
+def _parse_float_value(raw: str) -> Optional[float]:
+    match = re.search(r"(\d+(?:[.,]\d+)?)", raw or "")
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _parse_tu_hours(raw: str) -> tuple[Optional[float], Optional[float]]:
+    match = re.match(r"^\s*(\d+(?:[.,]\d+)?)\s*[+/]\s*(\d+(?:[.,]\d+)?)\s*$", raw or "")
+    if not match:
+        return None, None
+    try:
+        return float(match.group(1).replace(",", ".")), float(match.group(2).replace(",", "."))
+    except ValueError:
+        return None, None
+
+
+def _parse_absence_text(raw: str) -> dict[str, Optional[float]]:
+    result: dict[str, Optional[float]] = {
+        "absent_theoretical_hours": None,
+        "absent_practical_hours": None,
+        "absent_total_hours": None,
+        "absent_percent": None,
+    }
+    cleaned = _clean_text(raw)
+    if not cleaned or _tr_lower(cleaned) in _EMPTY_MARKERS:
+        return result
+
+    pct_match = re.search(r"(?:%\s*(\d+(?:[.,]\d+)?)|(\d+(?:[.,]\d+)?)\s*%)", cleaned)
+    if pct_match:
+        pct_str = pct_match.group(1) or pct_match.group(2)
+        try:
+            result["absent_percent"] = float(pct_str.replace(",", "."))
+        except ValueError:
+            pass
+
+    t_match = re.search(r"\bT(?:eorik)?\s*[:\-]\s*(\d+(?:[.,]\d+)?)", cleaned, re.IGNORECASE)
+    u_match = re.search(r"\bU(?:ygulama)?\s*[:\-]\s*(\d+(?:[.,]\d+)?)", cleaned, re.IGNORECASE)
+    if t_match:
+        result["absent_theoretical_hours"] = float(t_match.group(1).replace(",", "."))
+    if u_match:
+        result["absent_practical_hours"] = float(u_match.group(1).replace(",", "."))
+
+    if not t_match and not u_match:
+        without_pct = re.sub(r"(?:%\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*%)", "", cleaned)
+        hour_match = re.search(r"(\d+(?:[.,]\d+)?)", without_pct)
+        if hour_match:
+            result["absent_total_hours"] = float(hour_match.group(1).replace(",", "."))
+
+    return result
+
+
 def _parse_course_from_cells(
     cells: list[Tag],
     semester_name: str,
@@ -360,6 +432,28 @@ def _parse_course_from_cells(
     status = normalize_status(_cell_text(cells, col_map["status"]))
     class_id = _extract_class_id_from_cells(cells, [col_map["code"], col_map["name"]])
 
+    theory_hours: Optional[float] = None
+    practice_hours: Optional[float] = None
+    if "tu_hours" in col_map:
+        theory_hours, practice_hours = _parse_tu_hours(_cell_text(cells, col_map["tu_hours"]))
+    if "theory" in col_map and theory_hours is None:
+        theory_hours = _parse_float_value(_cell_text(cells, col_map["theory"]))
+    if "practice" in col_map and practice_hours is None:
+        practice_hours = _parse_float_value(_cell_text(cells, col_map["practice"]))
+
+    absence_data = (
+        _parse_absence_text(_cell_text(cells, col_map["absence"]))
+        if "absence" in col_map
+        else {}
+    )
+    att_status: Optional[str] = None
+    if "attendance_status" in col_map:
+        att_status = _normalize_optional_text(_cell_text(cells, col_map["attendance_status"]))
+    if att_status is None and status:
+        low_status = _tr_lower(status)
+        if "devam" in low_status or "muaf" in low_status:
+            att_status = status
+
     return CourseGrade(
         semester=semester_name,
         code=code,
@@ -369,6 +463,13 @@ def _parse_course_from_cells(
         letter_grade=letter_grade,
         status=status,
         class_id=class_id,
+        theoretical_hours=theory_hours,
+        practical_hours=practice_hours,
+        absent_theoretical_hours=absence_data.get("absent_theoretical_hours"),
+        absent_practical_hours=absence_data.get("absent_practical_hours"),
+        absent_total_hours=absence_data.get("absent_total_hours"),
+        absent_percent=absence_data.get("absent_percent"),
+        attendance_status=att_status,
     )
 
 
@@ -464,12 +565,98 @@ def _map_detail_exam_columns(table: Tag) -> dict[str, int]:
             mapped.setdefault("date", idx)
         elif "sınav notu" in title or title == "not" or "puan" in title:
             mapped.setdefault("score", idx)
+        elif "etki" in title or "ağırlık" in title or "agirlik" in title or "oran" in title or "%" in title:
+            mapped.setdefault("weight", idx)
         elif "sıralama" in title:
             mapped.setdefault("ranking", idx)
         elif "ortalama" in title:
             mapped.setdefault("average", idx)
 
     return {**defaults, **mapped}
+
+
+def _parse_weight_value(raw: str) -> Optional[float]:
+    val = _parse_float_value(raw)
+    if val is None or val <= 0:
+        return None
+    if val > 1.0:
+        val = val / 100.0
+    if val <= 0.0 or val > 1.0:
+        return None
+    return round(val, 4)
+
+
+def _extract_attendance_from_soup(soup: BeautifulSoup) -> dict[str, Any]:
+    """HTML içindeki tablo ve etiketlerden ders saati ve devamsızlık bilgisini çıkarır."""
+    info: dict[str, Any] = {}
+
+    pairs: list[tuple[str, str]] = []
+    for row in soup.find_all("tr"):
+        cells = row.find_all(["th", "td"], recursive=False)
+        if len(cells) == 2:
+            pairs.append((_clean_text(cells[0].get_text(" ", strip=True)), _clean_text(cells[1].get_text(" ", strip=True))))
+    for dt in soup.find_all("dt"):
+        dd = dt.find_next_sibling("dd")
+        if dd:
+            pairs.append((_clean_text(dt.get_text(" ", strip=True)), _clean_text(dd.get_text(" ", strip=True))))
+
+    for raw_label, raw_val in pairs:
+        label = _tr_lower(raw_label)
+        if not raw_val or _tr_lower(raw_val) in _EMPTY_MARKERS:
+            continue
+        if ("t+u" in label.replace(" ", "") or "t/u" in label.replace(" ", "")) and "theoretical_hours" not in info:
+            t_h, u_h = _parse_tu_hours(raw_val)
+            if t_h is not None:
+                info["theoretical_hours"] = t_h
+            if u_h is not None:
+                info["practical_hours"] = u_h
+        elif ("teorik" in label and "saat" in label) and "theoretical_hours" not in info:
+            val = _parse_float_value(raw_val)
+            if val is not None:
+                info["theoretical_hours"] = val
+        elif ("uygulama" in label and "saat" in label) and "practical_hours" not in info:
+            val = _parse_float_value(raw_val)
+            if val is not None:
+                info["practical_hours"] = val
+        elif "teorik" in label and ("devams" in label or "yoklama" in label):
+            parsed = _parse_absence_text(raw_val)
+            if parsed["absent_total_hours"] is not None:
+                info["absent_theoretical_hours"] = parsed["absent_total_hours"]
+            if parsed["absent_percent"] is not None and "absent_percent" not in info:
+                info["absent_percent"] = parsed["absent_percent"]
+        elif ("uygulama" in label or "lab" in label) and ("devams" in label or "yoklama" in label):
+            parsed = _parse_absence_text(raw_val)
+            if parsed["absent_total_hours"] is not None:
+                info["absent_practical_hours"] = parsed["absent_total_hours"]
+            if parsed["absent_percent"] is not None and "absent_percent" not in info:
+                info["absent_percent"] = parsed["absent_percent"]
+        elif "devam durumu" in label:
+            info.setdefault("attendance_status", raw_val)
+        elif "devamsızlık" in label or "devamsizlik" in label:
+            parsed = _parse_absence_text(raw_val)
+            for k, v in parsed.items():
+                if v is not None and k not in info:
+                    info[k] = v
+
+    return info
+
+
+def _find_attendance_partial_url(soup: BeautifulSoup) -> Optional[str]:
+    for tag in soup.find_all(["a", "button", "li"]):
+        text = _tr_lower(tag.get_text(" ", strip=True))
+        if not any(kw in text for kw in ("devamsız", "devamsiz", "yoklama", "devam durum")):
+            continue
+        for attr in ("data-url", "href", "onclick"):
+            val = str(tag.get(attr) or "").strip()
+            if not val or val == "#" or val.startswith("javascript:void"):
+                continue
+            if attr == "onclick":
+                m = re.search(r"""['"]([^'"]*(?:ClassDetail|Attendance|RollCall|Devamsiz|Yoklama)[^'"]*)['"]""", val, re.IGNORECASE)
+                if m:
+                    return m.group(1)
+            else:
+                return val
+    return None
 
 
 def _find_exam_table(container: Tag) -> Optional[Tag]:
@@ -531,6 +718,14 @@ def parse_class_detail(html: str) -> dict[str, Any]:
             ranking = _normalize_optional_text(_cell_text(cells, col_map["ranking"]))
             exam_avg = normalize_score(_cell_text(cells, col_map["average"]))
 
+            weight: Optional[float] = None
+            if "weight" in col_map:
+                weight = _parse_weight_value(_cell_text(cells, col_map["weight"]))
+            if weight is None:
+                inline_w = re.search(r"(?:%\s*(\d+(?:[.,]\d+)?)|(\d+(?:[.,]\d+)?)\s*%)", f"{exam_type} {exam_name}")
+                if inline_w:
+                    weight = _parse_weight_value(inline_w.group(1) or inline_w.group(2))
+
             if exam_type or exam_name:
                 exams.append(
                     ExamGrade(
@@ -540,6 +735,7 @@ def parse_class_detail(html: str) -> dict[str, Any]:
                         announcement_date=announcement_date,
                         class_average=exam_avg,
                         ranking=ranking,
+                        weight=weight,
                     )
                 )
 
@@ -559,9 +755,264 @@ def parse_class_detail(html: str) -> dict[str, Any]:
             if avg_match:
                 class_average = normalize_score(avg_match.group(1))
 
+    attendance_info = _extract_attendance_from_soup(soup)
+    attendance_partial_url = _find_attendance_partial_url(soup)
+
     return {
         "exams": exams,
         "letter_grade": letter_grade,
         "instructor": instructor,
         "class_average": class_average,
+        "attendance": attendance_info,
+        "attendance_partial_url": attendance_partial_url,
     }
+
+
+def parse_attendance_partial(html: str) -> dict[str, Any]:
+    """ClassDetail içindeki devamsızlık / yoklama sekmesi (partial HTML) verisini ayrıştırır."""
+    if is_login_page(html):
+        raise SessionExpiredError("Devamsızlık detayı alınırken oturum süresi doldu.")
+
+    soup = BeautifulSoup(html, "html.parser")
+    info = _extract_attendance_from_soup(soup)
+
+    if info.get("absent_total_hours") is None and info.get("absent_theoretical_hours") is None:
+        # Satır bazlı yoklama tablosundan "Katılmadı / Gelmedi / Yok" kayıtlarını say
+        for table in soup.find_all("table"):
+            header_row = _find_header_row(table)
+            header_text = _tr_lower(header_row.get_text(" ", strip=True)) if header_row else ""
+            if not any(kw in header_text for kw in ("durum", "katılım", "yoklama", "tarih")):
+                continue
+            tbody = table.find("tbody") or table
+            absent_count = 0.0
+            found_status_rows = False
+            for row in tbody.find_all("tr", recursive=False):
+                row_text = _tr_lower(row.get_text(" ", strip=True))
+                if any(kw in row_text for kw in ("katıldı", "geldi", "var", "katılmadı", "gelmedi", "yok")):
+                    found_status_rows = True
+                if any(kw in row_text for kw in ("katılmadı", "katilmadi", "gelmedi", "devamsız")):
+                    absent_count += 1.0
+            if found_status_rows:
+                info["absent_total_hours"] = absent_count
+                break
+
+    return info
+
+
+def parse_student_info_json(home_html: str) -> Optional[dict[str, Any]]:
+    """/AIS/Student/Home/Index sayfasındaki Base64 kodlu StudentInfo JSON nesnesini çözer."""
+    match = re.search(
+        r"""StudentInfo\s*=\s*JSON\.parse\(\s*Base64\.decode\(\s*["']([^"']+)["']\s*\)\s*\)""",
+        home_html,
+    )
+    if not match:
+        return None
+    try:
+        raw = base64.b64decode(match.group(1)).decode("utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def parse_student_gano(home_html: str) -> Optional[float]:
+    """Öğrenci ana sayfasından birikimli GANO değerini çıkarır."""
+    info = parse_student_info_json(home_html)
+    if not info:
+        return None
+    for program in info.get("Programs") or []:
+        if isinstance(program, dict) and program.get("GANO") is not None:
+            try:
+                return round(float(str(program["GANO"]).replace(",", ".")), 4)
+            except ValueError:
+                continue
+    return None
+
+
+def parse_transcript_url(home_html: str) -> Optional[str]:
+    """Öğrenci ana sayfasından Transkript bağlantısını bulur."""
+    soup = BeautifulSoup(home_html, "html.parser")
+    for link in soup.find_all("a", href=True):
+        href = str(link["href"]).strip()
+        low = href.lower()
+        if "/ais/student/transcript" in low or "/ais/student/transkript" in low:
+            return href
+    return None
+
+
+def _opt_float_tr(val: Any) -> Optional[float]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(str(val).strip().replace(",", "."))
+    except ValueError:
+        return None
+
+
+def parse_transcript(html: str) -> TranscriptSummary:
+    """ÜBYS transkript sayfasından (_jsm Base64 JSON veya HTML tablo fallback) özet çıkarır."""
+    if is_login_page(html):
+        raise SessionExpiredError("Transkript alınırken oturum süresi doldu.")
+
+    # 1. Öncelik: ÜBYS _jsm = JSON.parse(Base64.decode("..."))
+    jsm_match = re.search(
+        r"""_jsm\s*=\s*JSON\.parse\(\s*Base64\.decode\(\s*["']([^"']+)["']\s*\)\s*\)""",
+        html,
+    )
+    if jsm_match:
+        try:
+            decoded = base64.b64decode(jsm_match.group(1)).decode("utf-8")
+            data = json.loads(decoded)
+            transcripts = data.get("Transcripts") or []
+            if transcripts and isinstance(transcripts[0], dict):
+                t = transcripts[0]
+                semesters: list[TranscriptSemester] = []
+                last_cum_gpa: Optional[float] = None
+
+                for sem_raw in t.get("Semesters") or []:
+                    if not isinstance(sem_raw, dict):
+                        continue
+                    sem_name = _clean_text(str(sem_raw.get("SemesterName") or ""))
+                    sem_gpa = _opt_float_tr(sem_raw.get("SemesterAverage"))
+                    cum_gpa = _opt_float_tr(
+                        sem_raw.get("CumulativeAverage")
+                        or sem_raw.get("GeneralAverage")
+                        or sem_raw.get("GANO")
+                    )
+                    if cum_gpa is not None:
+                        last_cum_gpa = cum_gpa
+
+                    courses: list[TranscriptCourse] = []
+                    for c_raw in sem_raw.get("Courses") or []:
+                        if not isinstance(c_raw, dict):
+                            continue
+                        code = _clean_text(str(c_raw.get("CourseCode") or ""))
+                        name = _clean_text(str(c_raw.get("CourseName") or ""))
+                        if not (code or name):
+                            continue
+                        courses.append(
+                            TranscriptCourse(
+                                code=code,
+                                name=name,
+                                credit=_opt_float_tr(c_raw.get("Credit")),
+                                ects=_opt_float_tr(c_raw.get("Ects") or c_raw.get("AKTS")),
+                                letter_grade=normalize_letter_grade(
+                                    str(c_raw.get("Grade") or c_raw.get("LetterGrade") or "")
+                                ),
+                            )
+                        )
+                    if sem_name or courses:
+                        semesters.append(
+                            TranscriptSemester(
+                                name=sem_name or f"{len(semesters) + 1}. Dönem",
+                                semester_gpa=sem_gpa,
+                                cumulative_gpa=cum_gpa,
+                                courses=courses,
+                            )
+                        )
+
+                gano = _opt_float_tr(
+                    t.get("GANO")
+                    or t.get("CumulativeAverage")
+                    or t.get("GeneralAverage")
+                    or t.get("Average")
+                )
+                if gano is None:
+                    gano = last_cum_gpa
+
+                return TranscriptSummary(
+                    gano=gano,
+                    total_credit=_opt_float_tr(t.get("TotalCredit")),
+                    total_ects=_opt_float_tr(t.get("TotalEcts") or t.get("TotalAkts")),
+                    semesters=semesters,
+                )
+        except Exception:
+            pass
+
+    # 2. Yedek: HTML tabloları (table#test veya <caption> içeren tablolar)
+    soup = BeautifulSoup(html, "html.parser")
+    tables = soup.find_all("table", id="test")
+    if not tables:
+        tables = [tbl for tbl in soup.find_all("table") if tbl.find("caption")]
+
+    semesters_fb: list[TranscriptSemester] = []
+    overall_gano: Optional[float] = None
+
+    for tbl in tables:
+        caption = tbl.find("caption")
+        sem_name = _clean_text(caption.get_text(" ", strip=True)) if caption else ""
+        if not sem_name:
+            continue
+
+        sem_gpa: Optional[float] = None
+        cum_gpa: Optional[float] = None
+        courses_fb: list[TranscriptCourse] = []
+
+        tbody = tbl.find("tbody") or tbl
+        for row in tbody.find_all("tr", recursive=False):
+            cells = row.find_all("td", recursive=False)
+            if not cells:
+                continue
+            row_text = _tr_lower(row.get_text(" ", strip=True))
+            if any(kw in row_text for kw in ("ortalama", "birikimli", "gano", "gpa", "yano")):
+                for cell in reversed(cells):
+                    val = _opt_float_tr(cell.get_text(" ", strip=True))
+                    if val is not None and 0.0 <= val <= 4.0:
+                        if "birikimli" in row_text or "gano" in row_text or "genel" in row_text:
+                            cum_gpa = val
+                            overall_gano = val
+                        else:
+                            sem_gpa = val
+                        break
+                continue
+
+            if len(cells) < 3:
+                continue
+            code = _clean_text(cells[0].get_text(" ", strip=True))
+            name = _clean_text(cells[1].get_text(" ", strip=True))
+            credit = _opt_float_tr(cells[2].get_text(" ", strip=True))
+            ects: Optional[float] = None
+            if len(cells) >= 5:
+                ects = _opt_float_tr(cells[3].get_text(" ", strip=True))
+                letter = normalize_letter_grade(cells[4].get_text(" ", strip=True))
+            elif len(cells) == 4:
+                letter = normalize_letter_grade(cells[3].get_text(" ", strip=True))
+            else:
+                letter = None
+
+            if code or name:
+                courses_fb.append(
+                    TranscriptCourse(
+                        code=code,
+                        name=name,
+                        credit=credit,
+                        ects=ects,
+                        letter_grade=letter,
+                    )
+                )
+
+        if courses_fb or sem_gpa is not None:
+            semesters_fb.append(
+                TranscriptSemester(
+                    name=sem_name,
+                    semester_gpa=sem_gpa,
+                    cumulative_gpa=cum_gpa,
+                    courses=courses_fb,
+                )
+            )
+
+    if overall_gano is None:
+        for row in soup.find_all("tr"):
+            row_text = _tr_lower(row.get_text(" ", strip=True))
+            if "birikimli" in row_text or "gano" in row_text or "genel ortalama" in row_text:
+                for cell in reversed(row.find_all(["td", "th"])):
+                    val = _opt_float_tr(cell.get_text(" ", strip=True))
+                    if val is not None and 0.0 <= val <= 4.0:
+                        overall_gano = val
+                        break
+            if overall_gano is not None:
+                break
+
+    return TranscriptSummary(gano=overall_gano, semesters=semesters_fb)

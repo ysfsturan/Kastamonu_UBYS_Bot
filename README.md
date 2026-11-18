@@ -1,19 +1,21 @@
 # Kastamonu Üniversitesi Öğrenci Asistanı (Swiss Tool)
 
-Kastamonu Üniversitesi öğrencileri için **7/24 bulutta (GitHub Actions)** ücretsiz çalışan, Selenium/ChromeDriver gerektirmeyen, hafif ve modüler **Telegram asistanı**:
+Kastamonu Üniversitesi öğrencileri için **7/24 bulutta (GitHub Actions)** ücretsiz çalışan, Selenium/ChromeDriver gerektirmeyen, hafif ve modüler **Telegram öğrenci asistanı**:
 
-1. **ÜBYS Not Bildirimi (`https://ubys.kastamonu.edu.tr`):** Vize, Final, Bütünleme, Kısa Sınav, Ödev, Geçme Notu ve Harf Notu (`HBN`) değişikliklerini, sınıf ortalaması ve sıralamayla birlikte anlık bildirir.
-2. **SKS Yemekhane Menüsü (`https://sks.kastamonu.edu.tr`):** Hafta içi her sabah güncel günün yemek listesini ve yemek başı / toplam kalori bilgisini gönderir.
-3. **Akademik Takvim Takibi (`https://akademiktakvim.kastamonu.edu.tr`):** Yaklaşan sınavlar, kayıt yenileme, ders ekle-sil ve resmî tatiller için **7 / 3 / 1 / 0 gün** kala otomatik hatırlatma, her Pazartesi haftalık özet ve tek tıkla **Google Takvime Ekle** bağlantısı sunar.
+1. **ÜBYS Not Bildirimi (`https://ubys.kastamonu.edu.tr`):** Vize, Final, Bütünleme, Kısa Sınav, Ödev, Geçme Notu ve Harf Notu (`HBN`) değişikliklerini sınıf ortalaması ve sıralamayla birlikte anlık bildirir.
+2. **Final Hedef & Harf Notu Hesaplayıcı:** Kastamonu Üniversitesi harf skalasına göre (`DC ≥55`, `CC ≥60`, `CB ≥65`, `BB ≥75`, `BA ≥85`, `AA ≥90`) Vize notunuz açıklandığında finalden en az kaç almanız gerektiğini otomatik hesaplar (varsayılan `%40 Vize / %60 Final`, ders detayında oran varsa otomatik uyarlanır).
+3. **Devamsızlık Takibi (`%70 Teorik / %80 Uygulamalı`):** KÜ Yönetmeliği Madde 16 uyarınca teorik derslerde %70 (maks. %30 devamsızlık), uygulamalı derslerde %80 (maks. %20 devamsızlık) sınırına göre 14 haftalık toplam hakkınızı, kullandığınız ve kalan saatinizi hesaplar; kritik eşikte uyarı verir.
+4. **Transkript & GANO Takibi:** Tam transkript özetinizi (`YANO` / `GANO` / kredi / ders harf notları) çeker ve GANO'nuz değiştiğinde farkıyla (`📈` / `📉`) bildirir.
+5. **SKS Yemekhane Menüsü (`https://sks.kastamonu.edu.tr`):** Hafta içi her sabah güncel günün yemek listesini, yemek başı ve toplam kaloriyi gönderir.
+6. **Akademik Takvim Takibi (`https://akademiktakvim.kastamonu.edu.tr`):** Sınav, kayıt yenileme, ders ekle-sil ve resmî tatiller için **7 / 3 / 1 / 0 gün** kala hatırlatma, her Pazartesi haftalık özet ve **Google Takvime Ekle** bağlantısı sunar.
 
 ---
 
 ## Öne Çıkan Özellikler
 
-- **Sıfır Tarayıcı / Yüksek Hız:** Eski Selenium + ChromeDriver + `iframe` yapısı yerine doğrudan resmi sayfa uç noktalarına ve API'lere `httpx` + `BeautifulSoup` ile bağlanır.
+- **Sıfır Tarayıcı / Yüksek Hız:** Eski Selenium + ChromeDriver + `iframe` yapısı yerine doğrudan resmi uç noktalara `httpx` + `BeautifulSoup` ile bağlanır.
 - **Public Repo + Gizli Gist Güvenliği:** Durum verileriniz asla açık (Public) repoya yazılmaz; gizli (Secret) **GitHub Gist** içindeki `grades_state.json` dosyasında tutulur.
-- **Birim Seçenekli Akademik Takvim:** `GENEL` dışında `TIP`, `VET`, `DIS`, `LISANSUSTU`, `TURIZM` fakülte/enstitü özel takvimlerini destekler (`BOLUM_TIPI` secret'ınızla da otomatik uyumludur).
-- **Modül İzolasyonu:** Yemekhane veya Takvim sitesinde geçici bir bakım olsa bile ÜBYS not takibi kesintisiz çalışmaya devam eder.
+- **Modül İzolasyonu:** Yemekhane veya Takvim sitesinde geçici kesinti olsa bile ÜBYS not takibi kesintisiz çalışmaya devam eder.
 - **Geriye Dönük Secret Uyumu:** Mevcut `OGRENCI_NO`, `SIFRE`, `BOT_TOKEN`, `CHAT_ID`, `GIST_ID`, `GIST_TOKEN`, `BOLUM_TIPI` secret isimlerinizle ek ayar yapmadan çalışır.
 
 ---
@@ -30,18 +32,26 @@ Kastamonu Üniversitesi öğrencileri için **7/24 bulutta (GitHub Actions)** ü
 | `SIFRE` (veya `UBYS_PASSWORD`) | ÜBYS parolanız |
 | `BOT_TOKEN` (veya `TELEGRAM_BOT_TOKEN`) | `@BotFather`'dan aldığınız Telegram Bot Token'ı |
 | `CHAT_ID` (veya `TELEGRAM_CHAT_ID`) | Bildirim alacak Telegram Chat ID |
-| `GIST_ID` | Not ve bildirim durumunun saklanacağı **Secret Gist** ID'si |
+| `GIST_ID` | Durum verilerinin saklanacağı **Secret Gist** ID'si |
 | `GIST_TOKEN` | Yalnızca `gist` yetkisine sahip GitHub Personal Access Token |
 
 ### 2. İsteğe Bağlı Repository Variables
 
-**Settings → Secrets and variables → Actions → Variables** sekmesinden davranışları özelleştirebilirsiniz:
+**Settings → Secrets and variables → Actions → Variables** sekmesinden özelleştirebilirsiniz:
 
 | Variable Adı | Varsayılan | Açıklama |
 | --- | --- | --- |
 | `ENABLE_GRADES` | `true` | ÜBYS not takibini açar/kapatır |
 | `ENABLE_DINING` | `true` | Hafta içi yemekhane menüsü bildirimini açar/kapatır |
 | `ENABLE_CALENDAR` | `true` | Akademik takvim hatırlatma ve haftalık özetini açar/kapatır |
+| `ENABLE_ATTENDANCE` | `true` | Devamsızlık hakkı ve kritik eşik takibini açar/kapatır |
+| `ENABLE_TRANSCRIPT` | `true` | GANO değişimi ve transkript özetini açar/kapatır |
+| `MIDTERM_WEIGHT` | `0.40` | Varsayılan vize etki oranı (`0.40` veya `40`) |
+| `FINAL_WEIGHT` | `0.60` | Varsayılan final etki oranı (`0.60` veya `60`) |
+| `FINAL_MIN_SCORE` | `0` | Fakülte final alt barajı (genel yönetmelik için `0`) |
+| `SEMESTER_WEEKS` | `14` | Devamsızlık hesabında dönem hafta sayısı |
+| `THEORY_MIN_ATTENDANCE` | `70` | Teorik ders devam zorunluluğu (`%70`) |
+| `PRACTICE_MIN_ATTENDANCE` | `80` | Uygulamalı ders devam zorunluluğu (`%80`) |
 | `CALENDAR_FACULTY` | `GENEL` | `GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU`, `TURIZM` (veya `BOLUM_TIPI`) |
 | `CALENDAR_CATEGORIES` | `STUDENT` | `STUDENT` (Ders/Sınav/Kayıt/Tatil/KUZEM/OSD), `ALL` veya virgüllü liste |
 | `CALENDAR_REMINDER_DAYS` | `7,3,1,0` | Etkinlik başlamadan kaç gün önce hatırlatılacağı |
@@ -51,13 +61,15 @@ Kastamonu Üniversitesi öğrencileri için **7/24 bulutta (GitHub Actions)** ü
 
 ### 3. Actions Üzerinden Manuel Çalıştırma (`workflow_dispatch`)
 
-**Actions → Kastamonu ÜBYS Swiss Bot → Run workflow** menüsünden `mode` seçerek istediğiniz modülü anında test edebilirsiniz:
+**Actions → Kastamonu ÜBYS Swiss Bot → Run workflow** menüsünden `mode` seçebilirsiniz:
 
-- `once`: Normal tam çalıştırma (notlar + saat uygunsa günlük yemekhane/takvim). `test_notify: true` ile çalıştırırsanız durum değiştirmeden tüm modülleri test eder.
-- `test_all`: Etkin tüm modülleri test eder (`test_notify: true` ise Telegram'a da gönderir).
-- `dining`: Yalnızca günün/yaklaşan yemekhane menüsünü çeker (`test_notify: true` ise Telegram'a yollar).
-- `calendar`: Yalnızca akademik takvim özetini çeker (`test_notify: true` ise Telegram'a yollar).
-- `force_daily`: Saat veya hafta içi koşuluna bakmadan günlük yemekhane ve takvim özetini Telegram'a gönderir.
+- `once`: Normal tam çalıştırma (`test_notify: true` seçilirse durum değiştirmeden tüm modülleri test eder).
+- `test_all`: Etkin tüm modülleri (notlar + devamsızlık + transkript + yemekhane + takvim) test eder.
+- `dining`: Yalnızca günün/yaklaşan yemekhane menüsünü çeker (`test_notify: true` ile Telegram'a gönderir).
+- `calendar`: Yalnızca akademik takvim özetini çeker (`test_notify: true` ile Telegram'a gönderir).
+- `transcript`: Yalnızca ÜBYS transkript & GANO özetini çeker (`test_notify: true` ile Telegram'a gönderir).
+- `attendance`: Yalnızca aktif dönem devamsızlık hakkı raporunu çeker (`test_notify: true` ile Telegram'a gönderir).
+- `force_daily`: Saat/hafta içi kısıtını aşarak günlük yemekhane ve takvim özetini gönderir.
 
 ---
 
@@ -76,13 +88,14 @@ copy .env.example .env   # Linux/macOS için: cp .env.example .env
 
 Hızlı CLI komutları:
 
-- **Sadece yemekhane menüsünü gör (şifre gerektirmez):** `python -m src.main --dining`
-- **Sadece akademik takvimi gör (şifre gerektirmez):** `python -m src.main --calendar`
-- **Tüm modülleri ekranda test et:** `python -m src.main --test`
-- **Tüm modülleri test edip Telegram'a gönder:** `python -m src.main --test --notify-test`
-- **Tek seferlik tam çalıştırma:** `python -m src.main --once`
-- **Günlük yemekhane ve takvimi zorla gönder:** `python -m src.main --once --force-daily`
-- **Sürekli arka plan döngüsü:** `python -m src.main --loop`
+- **Çevrimdışı Final Hedef Hesapla:** `python -m src.main --calc 100`
+- **Devamsızlık Raporu:** `python -m src.main --attendance`
+- **Transkript & GANO Özeti:** `python -m src.main --transcript`
+- **Yemekhane Menüsü (şifresiz):** `python -m src.main --dining`
+- **Akademik Takvim (şifresiz):** `python -m src.main --calendar`
+- **Tüm Modülleri Test Et:** `python -m src.main --test` (Telegram için `--notify-test` ekleyin)
+- **Tek Seferlik Tam Kontrol:** `python -m src.main --once`
+- **Sürekli Arka Plan Döngüsü:** `python -m src.main --loop`
 - **Docker Compose ile:** `docker compose up -d --build`
 
 ---
