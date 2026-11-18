@@ -3,8 +3,8 @@
 Kastamonu Üniversitesi öğrencileri için **7/24 bulutta (GitHub Actions)** ücretsiz çalışan, Selenium/ChromeDriver gerektirmeyen, hafif ve modüler **Telegram öğrenci asistanı**:
 
 1. **ÜBYS Not Bildirimi (`https://ubys.kastamonu.edu.tr`):** Vize, Final, Bütünleme, Kısa Sınav, Ödev, Geçme Notu ve Harf Notu (`HBN`) değişikliklerini sınıf ortalaması ve sıralamayla birlikte anlık bildirir.
-2. **Final Hedef & Harf Notu Hesaplayıcı:** Kastamonu Üniversitesi harf skalasına göre (`DC ≥55`, `CC ≥60`, `CB ≥65`, `BB ≥75`, `BA ≥85`, `AA ≥90`) Vize notunuz açıklandığında finalden en az kaç almanız gerektiğini otomatik hesaplar (varsayılan `%40 Vize / %60 Final`, ders detayında oran varsa otomatik uyarlanır).
-3. **Devamsızlık Takibi (`%70 Teorik / %80 Uygulamalı`):** KÜ Yönetmeliği Madde 16 uyarınca teorik derslerde %70 (maks. %30 devamsızlık), uygulamalı derslerde %80 (maks. %20 devamsızlık) sınırına göre 14 haftalık toplam hakkınızı, kullandığınız ve kalan saatinizi hesaplar; kritik eşikte uyarı verir.
+2. **Final Hedef & Harf Notu Hesaplayıcı:** Kastamonu Üniversitesi harf skalasına göre (`DC ≥55`, `CC ≥60`, `CB ≥65`, `BB ≥75`, `BA ≥85`, `AA ≥90`) Vize notunuz açıklandığında finalden en az kaç almanız gerektiğini hesaplar. ÜBYS ders detayı, ÜBYS Eğitim Kataloğu (`Bologna`) veya `COURSE_WEIGHTS` ayarından dersin kendi **Vize/Final oranını (`%30/%70`, `%40/%60` vb.)** otomatik okur.
+3. **Gün Bazlı Devamsızlık Takibi (`%70 Teorik / %80 Uygulamalı`):** ÜBYS Eğitim Kataloğu'ndan (`Bologna`) her dersin gerçek **Teorik (`T`) + Uygulama (`U`) + Laboratuvar (`L`)** haftalık saatlerini otomatik çeker (14 günlük Gist önbellekli). KÜ Yönetmeliği Madde 16'ya göre toplam hakkınızı ve kalan hakkınızı **gün/hafta** (`4 gün hakkın var`, `Kalan: 2 gün` vb.) + saat karşılığı olarak gösterir ve kritik sınırda uyarır.
 4. **Transkript & GANO Takibi:** Tam transkript özetinizi (`YANO` / `GANO` / kredi / ders harf notları) çeker ve GANO'nuz değiştiğinde farkıyla (`📈` / `📉`) bildirir.
 5. **SKS Yemekhane Menüsü (`https://sks.kastamonu.edu.tr`):** Hafta içi her sabah güncel günün yemek listesini, yemek başı ve toplam kaloriyi gönderir.
 6. **Akademik Takvim Takibi (`https://akademiktakvim.kastamonu.edu.tr`):** Sınav, kayıt yenileme, ders ekle-sil ve resmî tatiller için **7 / 3 / 1 / 0 gün** kala hatırlatma, her Pazartesi haftalık özet ve **Google Takvime Ekle** bağlantısı sunar.
@@ -46,12 +46,16 @@ Kastamonu Üniversitesi öğrencileri için **7/24 bulutta (GitHub Actions)** ü
 | `ENABLE_CALENDAR` | `true` | Akademik takvim hatırlatma ve haftalık özetini açar/kapatır |
 | `ENABLE_ATTENDANCE` | `true` | Devamsızlık hakkı ve kritik eşik takibini açar/kapatır |
 | `ENABLE_TRANSCRIPT` | `true` | GANO değişimi ve transkript özetini açar/kapatır |
+| `ENABLE_CATALOG` | `true` | ÜBYS Eğitim Kataloğu'ndan dersin gerçek `T+U` saatlerini ve değerlendirme oranlarını otomatik çeker |
+| `UBYS_PROGRAM` | *(otomatik)* | Kataloğun kullanacağı bölüm adı veya ID'si (boş bırakılırsa otomatik algılanır) |
 | `MIDTERM_WEIGHT` | `0.40` | Varsayılan vize etki oranı (`0.40` veya `40`) |
 | `FINAL_WEIGHT` | `0.60` | Varsayılan final etki oranı (`0.60` veya `60`) |
 | `FINAL_MIN_SCORE` | `0` | Fakülte final alt barajı (genel yönetmelik için `0`) |
+| `COURSE_WEIGHTS` | *(boş)* | Ders bazlı özel vize/final oranı (`BPBZ201:30/70,BPBZ207:40/60`; tüm kaynaklara göre önceliklidir) |
 | `SEMESTER_WEEKS` | `14` | Devamsızlık hesabında dönem hafta sayısı |
 | `THEORY_MIN_ATTENDANCE` | `70` | Teorik ders devam zorunluluğu (`%70`) |
 | `PRACTICE_MIN_ATTENDANCE` | `80` | Uygulamalı ders devam zorunluluğu (`%80`) |
+| `COURSE_HOURS` | *(boş)* | Ders bazlı özel haftalık `T+U` saati (`BPBZ201:3+1,BPBZ207:4+0`) |
 | `CALENDAR_FACULTY` | `GENEL` | `GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU`, `TURIZM` (veya `BOLUM_TIPI`) |
 | `CALENDAR_CATEGORIES` | `STUDENT` | `STUDENT` (Ders/Sınav/Kayıt/Tatil/KUZEM/OSD), `ALL` veya virgüllü liste |
 | `CALENDAR_REMINDER_DAYS` | `7,3,1,0` | Etkinlik başlamadan kaç gün önce hatırlatılacağı |
@@ -88,7 +92,7 @@ copy .env.example .env   # Linux/macOS için: cp .env.example .env
 
 Hızlı CLI komutları:
 
-- **Çevrimdışı Final Hedef Hesapla:** `python -m src.main --calc 100`
+- **Çevrimdışı Final Hedef Hesapla:** `python -m src.main --calc 100` (özel oran için `--weights 30/70` eklenebilir)
 - **Devamsızlık Raporu:** `python -m src.main --attendance`
 - **Transkript & GANO Özeti:** `python -m src.main --transcript`
 - **Yemekhane Menüsü (şifresiz):** `python -m src.main --dining`

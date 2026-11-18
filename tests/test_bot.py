@@ -28,7 +28,14 @@ from src.calendar_tracker import (
     parse_calendar_api_json,
     resolve_faculty_name,
 )
-from src.config import Config, ConfigError, load_config
+from src.config import Config, ConfigError, load_config, parse_weight_pair
+from src.course_catalog import (
+    BolognaCatalogError,
+    enrich_courses_with_catalog,
+    extract_curriculum_courses,
+    parse_course_detail_jsm,
+    rank_program_candidates,
+)
 from src.differ import (
     GistStateStore,
     StateStorageError,
@@ -49,11 +56,13 @@ from src.grade_calculator import (
     analyze_course_grades,
     calculate_final_targets,
     estimate_course_grade,
+    resolve_course_weights,
     score_to_letter,
 )
-from src.main import TR_TZ, run_once
+from src.main import TR_TZ, main as cli_main, run_once
 from src.models import (
     CalendarEvent,
+    CourseCatalogEntry,
     CourseGrade,
     DailyMenu,
     DiningItem,
@@ -89,6 +98,7 @@ from src.ubys_parser import (
     parse_grades_index,
     parse_sap_id,
     parse_student_gano,
+    parse_student_program_hints,
     parse_transcript,
 )
 
@@ -451,6 +461,7 @@ class NotifierAndFlowTests(unittest.TestCase):
                 alert_after_consecutive_errors=2,
                 enable_dining=False,
                 enable_calendar=False,
+                enable_catalog=False,
             )
 
             sample_courses = [
@@ -836,6 +847,7 @@ class SwissToolFlowTests(unittest.TestCase):
                 enable_grades=True,
                 enable_dining=True,
                 enable_calendar=True,
+                enable_catalog=False,
                 notify_on_first_run=False,
             )
 
@@ -979,8 +991,27 @@ class GradeCalculatorTests(unittest.TestCase):
 
 class AttendanceTests(unittest.TestCase):
     def test_theory_practice_mixed_and_risk_levels(self) -> None:
-        # Teorik 3 saat * 14 hafta * 0.30 = 12.6 -> floor 12 saat
+        # Teorik 3 saat * 14 hafta * 0.30 = 12.6 -> floor 12 saat (4 gün)
+        # 9 saat = 3 gün kullanıldığında 3 saat = 1 tam gün kalır -> warning
         c_warn = CourseGrade(
+            semester="2026 - Güz",
+            code="BLM101",
+            name="Algoritmalar",
+            theoretical_hours=3.0,
+            practical_hours=0.0,
+            absent_total_hours=9.0,
+            attendance_status="Devamlı",
+        )
+        r_warn = evaluate_course_attendance(c_warn)
+        self.assertEqual(r_warn.max_total_absent, 12.0)
+        self.assertEqual(r_warn.remaining_total, 3.0)
+        self.assertEqual(r_warn.max_total_days, 4)
+        self.assertEqual(r_warn.used_total_days, 3.0)
+        self.assertEqual(r_warn.remaining_total_days, 1)
+        self.assertEqual(r_warn.risk_level, "warning")
+
+        # 10 saat kullanıldığında 2 saat kalır -> 0 tam gün -> critical
+        c_crit = CourseGrade(
             semester="2026 - Güz",
             code="BLM101",
             name="Algoritmalar",
@@ -989,23 +1020,11 @@ class AttendanceTests(unittest.TestCase):
             absent_total_hours=10.0,
             attendance_status="Devamlı",
         )
-        r_warn = evaluate_course_attendance(c_warn)
-        self.assertEqual(r_warn.max_total_absent, 12.0)
-        self.assertEqual(r_warn.remaining_total, 2.0)
-        self.assertEqual(r_warn.risk_level, "warning")
+        r_crit = evaluate_course_attendance(c_crit)
+        self.assertEqual(r_crit.remaining_total_days, 0)
+        self.assertEqual(r_crit.risk_level, "critical")
 
-        c_crit = CourseGrade(
-            semester="2026 - Güz",
-            code="BLM101",
-            name="Algoritmalar",
-            theoretical_hours=3.0,
-            practical_hours=0.0,
-            absent_total_hours=11.0,
-            attendance_status="Devamlı",
-        )
-        self.assertEqual(evaluate_course_attendance(c_crit).risk_level, "critical")
-
-        # Uygulamalı 2 saat * 14 hafta * 0.20 = 5.6 -> floor 5 saat
+        # Uygulamalı 2 saat * 14 hafta * 0.20 = 5.6 -> floor 5 saat (2 tam gün)
         c_prac = CourseGrade(
             semester="2026 - Güz",
             code="LAB102",
@@ -1017,9 +1036,11 @@ class AttendanceTests(unittest.TestCase):
         r_prac = evaluate_course_attendance(c_prac)
         self.assertEqual(r_prac.max_practice_absent, 5.0)
         self.assertEqual(r_prac.remaining_practice, 1.0)
+        self.assertEqual(r_prac.max_practice_days, 2)
+        self.assertEqual(r_prac.remaining_practice_days, 0)
         self.assertEqual(r_prac.risk_level, "critical")
 
-        # Karma 2+2 -> Teorik 8, Uygulama 5
+        # Karma 2+2 -> Teorik 8 saat (4 gün), Uygulama 5 saat (2 gün)
         c_mix = CourseGrade(
             semester="2026 - Güz",
             code="KRM202",
@@ -1034,6 +1055,12 @@ class AttendanceTests(unittest.TestCase):
         self.assertEqual(r_mix.remaining_theory, 6.0)
         self.assertEqual(r_mix.max_practice_absent, 5.0)
         self.assertEqual(r_mix.remaining_practice, 4.0)
+        self.assertEqual(r_mix.max_theory_days, 4)
+        self.assertEqual(r_mix.remaining_theory_days, 3)
+        self.assertEqual(r_mix.max_practice_days, 2)
+        self.assertEqual(r_mix.remaining_practice_days, 2)
+        self.assertEqual(r_mix.max_total_days, 2)
+        self.assertEqual(r_mix.remaining_total_days, 2)
         self.assertEqual(r_mix.risk_level, "safe")
 
     def test_parse_attendance_columns_and_diff_alerts(self) -> None:
@@ -1161,6 +1188,384 @@ class TranscriptTests(unittest.TestCase):
         fb_summary = parse_transcript(html_fb)
         self.assertEqual(fb_summary.gano, 3.25)
         self.assertEqual(fb_summary.semesters[0].courses[0].letter_grade, "BA")
+
+
+class CatalogAndCourseWeightsTests(unittest.TestCase):
+    def test_parse_course_detail_jsm_and_extract_curriculum(self) -> None:
+        jsm_30_70 = {
+            "CourseDetail": {
+                "TheoreticalCredit": 3.0,
+                "PractiseCredit": 1.0,
+                "LaboratoryCredit": 1.0,
+                "Credit": 4.0,
+                "Ects": 5.0,
+            },
+            "AssessmentMethodDetailList": [
+                {"ExamName": "Vize", "Order": 1, "PercentageContribution": 30.0},
+                {"ExamName": "Final", "Order": 9, "PercentageContribution": 70.0},
+            ],
+        }
+        b64_30_70 = base64.b64encode(json.dumps(jsm_30_70).encode("utf-8")).decode("ascii")
+        parsed_30 = parse_course_detail_jsm(f'<script>var _jsm = JSON.parse(Base64.decode("{b64_30_70}"));</script>')
+        self.assertEqual(parsed_30["theoretical_hours"], 3.0)
+        self.assertEqual(parsed_30["practical_hours"], 1.0)
+        self.assertEqual(parsed_30["lab_hours"], 1.0)
+        self.assertEqual(parsed_30["midterm_weight"], 0.3)
+        self.assertEqual(parsed_30["final_weight"], 0.7)
+
+        jsm_multi = {
+            "CourseDetail": {"TheoreticalCredit": 4.0, "PractiseCredit": 0.0, "LaboratoryCredit": 0.0},
+            "AssessmentMethodDetailList": [
+                {"ExamName": "Vize", "PercentageContribution": 30.0},
+                {"ExamName": "Ödev", "PercentageContribution": 10.0},
+                {"ExamName": "Final", "PercentageContribution": 60.0},
+            ],
+        }
+        b64_multi = base64.b64encode(json.dumps(jsm_multi).encode("utf-8")).decode("ascii")
+        parsed_multi = parse_course_detail_jsm(f'<script>_jsm = JSON.parse(Base64.decode("{b64_multi}"));</script>')
+        self.assertEqual(parsed_multi["midterm_weight"], 0.3)
+        self.assertEqual(parsed_multi["final_weight"], 0.6)
+        self.assertEqual(len(parsed_multi["assessments"]), 3)
+
+        cur_json = {
+            "CurriculumDetails": [
+                {
+                    "EncryptedId": "CUR_ENC_1",
+                    "CurriculumCources": [
+                        {
+                            "Course": {
+                                "Code": "BPBZ201",
+                                "Name": "İnternet Programcılığı",
+                                "TheoreticalCredit": 3.0,
+                                "PractiseCredit": 1.0,
+                                "LaboratoryCredit": 0.0,
+                                "Credit": 4.0,
+                                "Ects": 4.0,
+                                "EncryptedId": "C_ENC_1",
+                                "CourseType": 12301,
+                                "IsApproved": True,
+                                "IsActiveForBologna": True,
+                            }
+                        },
+                        {
+                            "ElectivePool": {
+                                "ElectivePoolCourses": [
+                                    {
+                                        "Code": "BPBS213",
+                                        "Name": "Nesne Tabanlı Programlama-I",
+                                        "TheoreticalCredit": 2.0,
+                                        "PractiseCredit": 0.0,
+                                        "LaboratoryCredit": 1.0,
+                                        "Credit": 3.0,
+                                        "Ects": 3.0,
+                                        "EncryptedId": "C_ENC_2",
+                                        "IsApproved": True,
+                                        "IsActiveForBologna": True,
+                                    }
+                                ]
+                            }
+                        },
+                    ],
+                }
+            ]
+        }
+        extracted = extract_curriculum_courses(cur_json)
+        self.assertIn("BPBZ201", extracted)
+        self.assertIn("BPBS213", extracted)
+        self.assertFalse(extracted["BPBZ201"]["is_elective"])
+        self.assertTrue(extracted["BPBS213"]["is_elective"])
+        self.assertEqual(extracted["BPBS213"]["lab_hours"], 1.0)
+
+    def test_rank_program_candidates_and_hints(self) -> None:
+        home_html = """
+        <div class="panel">
+          <a href="#" onclick="selectAcademicProgram('SAP1')">
+            Kastamonu MYO - Bilgisayar Programcılığı
+          </a>
+        </div>
+        <table>
+          <tr><th>Bölüm</th><td>Bilgisayar Teknolojileri Bölümü</td></tr>
+        </table>
+        """
+        hints = parse_student_program_hints(home_html)
+        self.assertTrue(any("Bilgisayar Programcılığı" in h for h in hints))
+        self.assertIn("Bilgisayar Teknolojileri Bölümü", hints)
+
+        units = [
+            {
+                "IsAcademicProgram": True,
+                "AcademicProgramId": 5611,
+                "CurriculumId": 100,
+                "FullAcademicProgramName": "Cide Rıfat Ilgaz Meslek Yüksekokulu - Bilgisayar Programcılığı",
+                "Name": "Bilgisayar Programcılığı",
+            },
+            {
+                "IsAcademicProgram": True,
+                "AcademicProgramId": 5511,
+                "CurriculumId": 101,
+                "FullAcademicProgramName": "Kastamonu Meslek Yüksekokulu Müdürlüğü - Bilgisayar Teknolojileri Bölümü / Bilgisayar Programcılığı",
+                "Name": "Bilgisayar Programcılığı",
+            },
+            {
+                "IsAcademicProgram": True,
+                "AcademicProgramId": 9999,
+                "CurriculumId": 102,
+                "FullAcademicProgramName": "Tıp Fakültesi - Tıp",
+                "Name": "Tıp",
+            },
+        ]
+        courses = [
+            CourseGrade(semester="2026 - Güz", code="BPBZ201", name="İnternet Programcılığı"),
+            CourseGrade(semester="2026 - Güz", code="BPBZ207", name="Bilgisayar Ağları"),
+        ]
+
+        # 1. SAYISAL ID override doğrudan eşleşmeli
+        by_id = rank_program_candidates(units, [], courses, program_override="5511")
+        self.assertEqual([u["AcademicProgramId"] for u in by_id], [5511])
+
+        # 2. Home/Index hint'leri ("Kastamonu MYO ...") Cide yerine 5511'i öne geçirmeli
+        by_hint = rank_program_candidates(units, hints, courses)
+        self.assertEqual(by_hint[0]["AcademicProgramId"], 5511)
+
+        # 3. Sıfır hint olsa bile BP ön eki + Bilgisayar ders adı ile Bilgisayar Programcılığı adaylarını Tıp önüne geçirmeli
+        by_courses = rank_program_candidates(units, [], courses)
+        self.assertIn(by_courses[0]["AcademicProgramId"], {5511, 5611})
+        self.assertNotIn(9999, [u["AcademicProgramId"] for u in by_courses])
+
+    def test_weight_priority_chain_and_calc_cli(self) -> None:
+        # 1. parse_weight_pair + config parsing
+        self.assertEqual(parse_weight_pair("30/70"), (0.3, 0.7))
+        self.assertEqual(parse_weight_pair("30"), (0.3, 0.7))
+        self.assertEqual(parse_weight_pair("0.35-0.65"), (0.35, 0.65))
+
+        env = {
+            "OGRENCI_NO": "221234567",
+            "SIFRE": "parola123",
+            "BOT_TOKEN": "123:ABC",
+            "CHAT_ID": "998877",
+            "ENABLE_CATALOG": "false",
+            "UBYS_PROGRAM": "5511",
+            "COURSE_WEIGHTS": "BPBZ201:30/70; BPBZ207=40",
+            "COURSE_HOURS": "BPBZ201:3+1, BPBZ207:4",
+        }
+        with patch("src.config.load_dotenv", None), patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+            self.assertFalse(cfg.enable_catalog)
+            self.assertEqual(cfg.ubys_program, "5511")
+            self.assertEqual(cfg.course_weights, {"BPBZ201": (0.3, 0.7), "BPBZ207": (0.4, 0.6)})
+            self.assertEqual(cfg.course_hours, {"BPBZ201": (3.0, 1.0), "BPBZ207": (4.0, 0.0)})
+
+        # 2. UBYS Final henüz girilmemişken bile (score=None) Final weight=%70 + Vize weight=%30 tanınmalı
+        course_unscored_final = CourseGrade(
+            semester="2026 - Güz",
+            code="BPBZ201",
+            name="İnternet Programcılığı",
+            exams=[
+                ExamGrade(exam_type="Ara Sınav", name="Vize", score="100", weight=0.30),
+                ExamGrade(exam_type="Yarıyıl Sonu", name="Final", score=None, weight=0.70),
+            ],
+            midterm_weight=0.40,
+            final_weight=0.60,
+            weight_source="bologna",
+        )
+        mw, fw, src = resolve_course_weights(course_unscored_final)
+        self.assertEqual((mw, fw, src), (0.30, 0.70, "ubys"))
+        analysis, estimate = analyze_course_grades(course_unscored_final)
+        self.assertIsNone(estimate)
+        assert analysis is not None
+        targets_map = {t.letter: t.required_final for t in analysis.targets}
+        # 100 * 0.30 + Final * 0.70 >= 60 -> Final >= 30/0.7 = 42.85 -> ceil 43
+        self.assertEqual(targets_map["CC"], 43)
+        # 100 * 0.30 + Final * 0.70 >= 90 -> Final >= 60/0.7 = 85.71 -> ceil 86
+        self.assertEqual(targets_map["AA"], 86)
+
+        # 3. Bologna ağırlığı (UBYS'de weight yoksa %30/%70 kullanılır) + COURSE_WEIGHTS ("manual") hepsini ezer
+        course_bologna = CourseGrade(
+            semester="2026 - Güz",
+            code="BPBZ203",
+            name="Görsel Programlama I",
+            exams=[
+                ExamGrade(exam_type="Ara Sınav", name="Vize", score="100"),
+                ExamGrade(exam_type="Yarıyıl Sonu", name="Final", score=None),
+            ],
+        )
+        cat = {
+            "BPBZ203": CourseCatalogEntry(
+                code="BPBZ203",
+                name="Görsel Programlama I",
+                theoretical_hours=3.0,
+                practical_hours=1.0,
+                lab_hours=0.0,
+                midterm_weight=0.30,
+                final_weight=0.70,
+            )
+        }
+        enrich_courses_with_catalog([course_bologna], cat)
+        self.assertEqual((course_bologna.theoretical_hours, course_bologna.practical_hours), (3.0, 1.0))
+        self.assertEqual(course_bologna.hours_source, "bologna")
+        self.assertEqual(resolve_course_weights(course_bologna), (0.30, 0.70, "bologna"))
+
+        # COURSE_WEIGHTS ("manual") UBYS'den de Bologna'dan da öncelikli
+        enrich_courses_with_catalog(
+            [course_unscored_final],
+            cat,
+            course_weights_overrides={"BPBZ201": (0.25, 0.75)},
+            course_hours_overrides={"BPBZ201": (2.0, 2.0)},
+        )
+        self.assertEqual(resolve_course_weights(course_unscored_final), (0.25, 0.75, "manual"))
+        self.assertEqual((course_unscored_final.theoretical_hours, course_unscored_final.practical_hours), (2.0, 2.0))
+        self.assertEqual(course_unscored_final.hours_source, "manual")
+
+        # 4. --calc 100 --weights 30/70 CLI akışı
+        with patch("src.config.load_dotenv", None), patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(cli_main(["--calc", "100", "--weights", "30/70"]), 0)
+            self.assertEqual(cli_main(["--calc", "100", "--weights", "invalid"]), 2)
+
+    def test_day_based_attendance_formatting(self) -> None:
+        courses = [
+            CourseGrade(
+                semester="2026 - Güz",
+                code="BPBZ207",
+                name="Bilgisayar Ağları",
+                theoretical_hours=4.0,
+                practical_hours=0.0,
+                attendance_status="Devamlı",
+            ),
+            CourseGrade(
+                semester="2026 - Güz",
+                code="BPBZ201",
+                name="İnternet Programcılığı",
+                theoretical_hours=3.0,
+                practical_hours=1.0,
+                attendance_status="Devamlı",
+            ),
+            CourseGrade(
+                semester="2026 - Güz",
+                code="BPBS213",
+                name="Nesne Tabanlı Programlama-I",
+                theoretical_hours=2.0,
+                practical_hours=1.0,
+                absent_theoretical_hours=2.0,
+                absent_practical_hours=1.0,
+                attendance_status="Devamlı",
+            ),
+            CourseGrade(
+                semester="2026 - Güz",
+                code="BPBZ205",
+                name="Mesleki Yabancı Dil I",
+                theoretical_hours=2.0,
+                practical_hours=0.0,
+                absent_total_hours=7.0,
+                attendance_status="Devamlı",
+            ),
+        ]
+        reports = evaluate_all_attendance(courses)
+        msg = format_attendance_report(reports, "https://ubys.kastamonu.edu.tr")
+
+        self.assertIn("4 gün hakkın var (16 saat)", msg)
+        self.assertIn("Teorik 4 gün (12 saat), Uyg 2 gün (2 saat)", msg)
+        self.assertIn("Tam gün: 2 gün hakkın var", msg)
+        self.assertIn("Teorik: 1/4 gün (Kalan: 3 gün / 6s)", msg)
+        self.assertIn("Uyg: 1/2 gün (Kalan: 1 gün / 1s)", msg)
+        self.assertIn("0 tam gün (1 saat)", msg)
+
+    def test_catalog_state_caching_in_run_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=True,
+                enable_dining=False,
+                enable_calendar=False,
+                enable_attendance=True,
+                enable_catalog=True,
+                notify_on_first_run=False,
+            )
+            courses_initial = [
+                CourseGrade(
+                    semester="2026 - Güz",
+                    code="BPBZ201",
+                    name="İnternet Programcılığı",
+                    exams=[ExamGrade(exam_type="Ara Sınav", name="Vize", score="100")],
+                )
+            ]
+            courses_with_new = [
+                CourseGrade(semester="2026 - Güz", code="BPBZ201", name="İnternet Programcılığı"),
+                CourseGrade(semester="2026 - Güz", code="BPBZ209", name="İşletim Sistemleri"),
+            ]
+            cat_entries = {
+                "BPBZ201": CourseCatalogEntry(
+                    code="BPBZ201",
+                    name="İnternet Programcılığı",
+                    theoretical_hours=3.0,
+                    practical_hours=1.0,
+                    midterm_weight=0.30,
+                    final_weight=0.70,
+                ),
+                "BPBZ207": CourseCatalogEntry(
+                    code="BPBZ207",
+                    name="Bilgisayar Ağları",
+                    theoretical_hours=4.0,
+                    practical_hours=0.0,
+                    midterm_weight=0.40,
+                    final_weight=0.60,
+                ),
+            }
+
+            with (
+                patch("src.main.UBYSClient") as mock_ubys,
+                patch("src.main.fetch_catalog_for_courses", return_value=(cat_entries, 5511, "Kastamonu MYO")) as mock_cat,
+                patch("src.main.TelegramNotifier"),
+            ):
+                inst = mock_ubys.return_value.__enter__.return_value
+                inst.last_home_gano = None
+                inst.student_program_hints = ["Kastamonu MYO"]
+
+                # 1. İlk çalıştırma: katalog çekilir ve Gist/state içine önbelleklenir
+                inst.fetch_grades.return_value = [CourseGrade(**courses_initial[0].__dict__)]
+                self.assertEqual(run_once(cfg), 0)
+                self.assertEqual(mock_cat.call_count, 1)
+
+                saved = load_state(state_path)
+                assert saved is not None
+                saved_course = saved["courses"]["2026 - Güz::BPBZ201"]
+                self.assertEqual(saved_course["theoretical_hours"], 3.0)
+                self.assertEqual(saved_course["practical_hours"], 1.0)
+                self.assertEqual(saved_course["midterm_weight"], 0.30)
+                self.assertEqual(saved_course["final_weight"], 0.70)
+                self.assertEqual(saved["swiss_tool"]["course_catalog"]["program_id"], 5511)
+
+                # 2. İkinci çalıştırma aynı derslerle: katalog tekrar sorulmamalı (cache hit)
+                inst.fetch_grades.return_value = [
+                    CourseGrade(
+                        semester="2026 - Güz",
+                        code="BPBZ201",
+                        name="İnternet Programcılığı",
+                        exams=[ExamGrade(exam_type="Ara Sınav", name="Vize", score="100")],
+                    )
+                ]
+                self.assertEqual(run_once(cfg), 0)
+                self.assertEqual(mock_cat.call_count, 1)
+
+                # 3. Yeni ders kodu gelince katalog yenilenmeli
+                inst.fetch_grades.return_value = courses_with_new
+                self.assertEqual(run_once(cfg), 0)
+                self.assertEqual(mock_cat.call_count, 2)
+
+                # 4. Katalog hatasında not takibi yine de başarıyla (0) tamamlanmalı
+                mock_cat.side_effect = BolognaCatalogError("Bologna geçici hata")
+                saved = load_state(state_path)
+                assert saved is not None
+                saved["swiss_tool"]["course_catalog"]["updated_date"] = "2020-01-01"
+                save_state(state_path, saved)
+                inst.fetch_grades.return_value = [
+                    CourseGrade(semester="2026 - Güz", code="BPBZ205", name="Mesleki Yabancı Dil I")
+                ]
+                self.assertEqual(run_once(cfg), 0)
 
 
 if __name__ == "__main__":

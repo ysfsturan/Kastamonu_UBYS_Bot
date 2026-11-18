@@ -565,7 +565,17 @@ def _map_detail_exam_columns(table: Tag) -> dict[str, int]:
             mapped.setdefault("date", idx)
         elif "sınav notu" in title or title == "not" or "puan" in title:
             mapped.setdefault("score", idx)
-        elif "etki" in title or "ağırlık" in title or "agirlik" in title or "oran" in title or "%" in title:
+        elif (
+            "etki" in title
+            or "ağırlık" in title
+            or "agirlik" in title
+            or "oran" in title
+            or "katkı" in title
+            or "katki" in title
+            or "yüzde" in title
+            or "yuzde" in title
+            or "%" in title
+        ):
             mapped.setdefault("weight", idx)
         elif "sıralama" in title:
             mapped.setdefault("ranking", idx)
@@ -813,6 +823,101 @@ def parse_student_info_json(home_html: str) -> Optional[dict[str, Any]]:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def _collect_program_strings_from_obj(obj: Any, hints: list[str]) -> None:
+    target_keys = {
+        "FullAcademicProgramName",
+        "AcademicProgramName",
+        "ProgramName",
+        "DepartmentName",
+        "UnitName",
+        "FacultyName",
+        "AcademicProgramId",
+    }
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            if key in target_keys and val is not None:
+                text = _clean_text(str(val))
+                if text and len(text) <= 200:
+                    hints.append(text)
+            elif isinstance(val, (dict, list)):
+                _collect_program_strings_from_obj(val, hints)
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                _collect_program_strings_from_obj(item, hints)
+
+
+def parse_student_program_hints(html: str) -> list[str]:
+    """Öğrenci ana veya ders sayfasından fakülte/MYO/bölüm/program ipuçlarını çıkarır."""
+    raw_hints: list[str] = []
+
+    info = parse_student_info_json(html)
+    if info:
+        _collect_program_strings_from_obj(info, raw_hints)
+
+    for jsm_match in re.finditer(
+        r"""Base64\.decode\(\s*["']([^"']+)["']\s*\)""",
+        html or "",
+    ):
+        try:
+            decoded = base64.b64decode(jsm_match.group(1)).decode("utf-8")
+            parsed = json.loads(decoded)
+            if isinstance(parsed, (dict, list)):
+                _collect_program_strings_from_obj(parsed, raw_hints)
+        except Exception:
+            continue
+
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    for tag in soup.find_all(["a", "button", "li", "div", "tr"]):
+        onclick = str(tag.get("onclick") or "")
+        if "selectAcademicProgram" in onclick:
+            text = _clean_text(tag.get_text(" ", strip=True))
+            if text and len(text) <= 180:
+                raw_hints.append(text)
+            parent = tag.parent
+            if parent is not None:
+                parent_text = _clean_text(parent.get_text(" ", strip=True))
+                if parent_text and len(parent_text) <= 180:
+                    raw_hints.append(parent_text)
+
+    label_pairs: list[tuple[str, str]] = []
+    for row in soup.find_all("tr"):
+        cells = row.find_all(["th", "td"], recursive=False)
+        if len(cells) == 2:
+            label_pairs.append(
+                (_clean_text(cells[0].get_text(" ", strip=True)), _clean_text(cells[1].get_text(" ", strip=True)))
+            )
+    for dt in soup.find_all("dt"):
+        dd = dt.find_next_sibling("dd")
+        if dd:
+            label_pairs.append(
+                (_clean_text(dt.get_text(" ", strip=True)), _clean_text(dd.get_text(" ", strip=True)))
+            )
+
+    for raw_label, raw_val in label_pairs:
+        low_label = _tr_lower(raw_label)
+        if not raw_val or len(raw_val) > 200 or _tr_lower(raw_val) in _EMPTY_MARKERS:
+            continue
+        if "ders programı" in low_label or "ders programi" in low_label:
+            continue
+        if any(
+            kw in low_label
+            for kw in ("fakülte", "fakulte", "yüksekokul", "yuksekokul", "enstitü", "enstitu", "bölüm", "bolum", "program", "birim")
+        ):
+            raw_hints.append(raw_val)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in raw_hints:
+        cleaned = _clean_text(item)
+        if not cleaned or len(cleaned) > 200 or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+    return deduped
 
 
 def parse_student_gano(home_html: str) -> Optional[float]:

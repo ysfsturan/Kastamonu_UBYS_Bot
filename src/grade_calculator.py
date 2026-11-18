@@ -46,6 +46,7 @@ def calculate_final_targets(
     midterm_weight: float = 0.40,
     final_weight: float = 0.60,
     final_min_score: int = 0,
+    weight_source: str = "default",
 ) -> GradeTargetAnalysis:
     """Vize puanına göre her harf notu için finalden alınması gereken minimum puanları hesaplar."""
     targets: list[FinalTarget] = []
@@ -97,6 +98,7 @@ def calculate_final_targets(
         targets=targets,
         max_possible_total=max_possible,
         max_possible_letter=max_letter,
+        weight_source=weight_source,
     )
 
 
@@ -143,6 +145,65 @@ def _classify_exam(exam: ExamGrade) -> str:
     return "other"
 
 
+def _is_valid_weight_pair(mw: Optional[float], fw: Optional[float]) -> bool:
+    return (
+        mw is not None
+        and fw is not None
+        and 0.0 < mw < 1.0
+        and 0.0 < fw < 1.0
+        and abs((mw + fw) - 1.0) <= 0.05
+    )
+
+
+def resolve_course_weights(
+    course: CourseGrade,
+    default_midterm_weight: float = 0.40,
+    default_final_weight: float = 0.60,
+) -> tuple[float, float, str]:
+    """Dersin vize/final ağırlıklarını öncelik sırasıyla belirler: manual > ubys > bologna > default."""
+    if course.weight_source == "manual" and _is_valid_weight_pair(course.midterm_weight, course.final_weight):
+        return float(course.midterm_weight), float(course.final_weight), "manual"
+
+    in_term_total = 0.0
+    midterm_only_total = 0.0
+    final_weights: list[float] = []
+    makeup_weights: list[float] = []
+
+    for exam in course.exams:
+        w = exam.weight
+        if w is None or w <= 0.0 or w >= 1.0:
+            continue
+        kind = _classify_exam(exam)
+        if kind == "midterm":
+            midterm_only_total += w
+            in_term_total += w
+        elif kind == "other":
+            in_term_total += w
+        elif kind == "final":
+            final_weights.append(w)
+        elif kind == "makeup":
+            makeup_weights.append(w)
+
+    mw_exam = in_term_total if 0.0 < in_term_total < 1.0 else (midterm_only_total if 0.0 < midterm_only_total < 1.0 else None)
+    fw_exam = final_weights[-1] if final_weights else (makeup_weights[-1] if makeup_weights else None)
+
+    if _is_valid_weight_pair(mw_exam, fw_exam):
+        return float(mw_exam), float(fw_exam), "ubys"
+    if mw_exam is not None and 0.0 < mw_exam < 1.0 and fw_exam is None:
+        return round(float(mw_exam), 4), round(1.0 - float(mw_exam), 4), "ubys"
+    if fw_exam is not None and 0.0 < fw_exam < 1.0 and mw_exam is None:
+        return round(1.0 - float(fw_exam), 4), round(float(fw_exam), 4), "ubys"
+
+    if _is_valid_weight_pair(course.midterm_weight, course.final_weight):
+        return (
+            float(course.midterm_weight),
+            float(course.final_weight),
+            course.weight_source or "bologna",
+        )
+
+    return default_midterm_weight, default_final_weight, "default"
+
+
 def analyze_course_grades(
     course: CourseGrade,
     default_midterm_weight: float = 0.40,
@@ -150,7 +211,14 @@ def analyze_course_grades(
     final_min_score: int = 0,
 ) -> tuple[Optional[GradeTargetAnalysis], Optional[GradeEstimate]]:
     """Dersin mevcut sınav notlarına göre final hedef analizi veya tahmini harf notu üretir."""
+    mw, fw, weight_source = resolve_course_weights(
+        course,
+        default_midterm_weight=default_midterm_weight,
+        default_final_weight=default_final_weight,
+    )
+
     midterms: list[tuple[float, Optional[float]]] = []
+    others: list[tuple[float, Optional[float]]] = []
     finals: list[tuple[float, Optional[float]]] = []
     makeups: list[tuple[float, Optional[float]]] = []
 
@@ -161,6 +229,8 @@ def analyze_course_grades(
         kind = _classify_exam(exam)
         if kind == "midterm":
             midterms.append((num_score, exam.weight))
+        elif kind == "other":
+            others.append((num_score, exam.weight))
         elif kind == "final":
             finals.append((num_score, exam.weight))
         elif kind == "makeup":
@@ -169,32 +239,29 @@ def analyze_course_grades(
     if not midterms:
         return None, None
 
+    weighted_others = [(s, float(w)) for s, w in others if w is not None and 0.0 < w < 1.0]
     if all(w is not None and w > 0 for _, w in midterms):
-        total_mw = sum(float(w) for _, w in midterms if w is not None)
-        midterm_score = sum(s * float(w) for s, w in midterms if w is not None) / total_mw
-        midterm_w_from_exam: Optional[float] = total_mw if 0 < total_mw < 1 else None
+        weighted_items = [(s, float(w)) for s, w in midterms if w is not None] + weighted_others
+        total_mw = sum(w for _, w in weighted_items)
+        midterm_score = sum(s * w for s, w in weighted_items) / total_mw
     else:
         midterm_score = sum(s for s, _ in midterms) / len(midterms)
-        midterm_w_from_exam = None
 
     end_term_list = makeups if makeups else finals
     end_score: Optional[float] = None
-    end_w_from_exam: Optional[float] = None
     if end_term_list:
-        end_score, end_w_from_exam = end_term_list[-1]
-
-    if (
-        midterm_w_from_exam is not None
-        and end_w_from_exam is not None
-        and 0 < midterm_w_from_exam < 1
-        and 0 < end_w_from_exam < 1
-        and abs((midterm_w_from_exam + end_w_from_exam) - 1.0) <= 0.05
-    ):
-        mw, fw = midterm_w_from_exam, end_w_from_exam
-    else:
-        mw, fw = default_midterm_weight, default_final_weight
+        end_score, _ = end_term_list[-1]
 
     if end_score is None:
-        return calculate_final_targets(midterm_score, mw, fw, final_min_score), None
+        return (
+            calculate_final_targets(
+                midterm_score,
+                mw,
+                fw,
+                final_min_score,
+                weight_source=weight_source,
+            ),
+            None,
+        )
 
     return None, estimate_course_grade(midterm_score, end_score, mw, fw, final_min_score)

@@ -75,6 +75,11 @@ class CourseGrade:
     absent_total_hours: Optional[float] = None
     absent_percent: Optional[float] = None
     attendance_status: Optional[str] = None
+    midterm_weight: Optional[float] = None
+    final_weight: Optional[float] = None
+    weight_source: Optional[str] = None
+    hours_source: Optional[str] = None
+    catalog_assessments: list[dict[str, Any]] = field(default_factory=list)
 
     def course_key(self) -> str:
         """Dersi dönem ve kod/ad bazında benzersiz olarak tanımlar."""
@@ -102,6 +107,10 @@ class CourseGrade:
             "absent_total_hours": self.absent_total_hours,
             "absent_percent": self.absent_percent,
             "attendance_status": self.attendance_status,
+            "midterm_weight": self.midterm_weight,
+            "final_weight": self.final_weight,
+            "weight_source": self.weight_source,
+            "hours_source": self.hours_source,
         }
 
     @classmethod
@@ -127,6 +136,74 @@ class CourseGrade:
             absent_total_hours=_opt_float(data.get("absent_total_hours")),
             absent_percent=_opt_float(data.get("absent_percent")),
             attendance_status=data.get("attendance_status"),
+            midterm_weight=_opt_float(data.get("midterm_weight")),
+            final_weight=_opt_float(data.get("final_weight")),
+            weight_source=data.get("weight_source"),
+            hours_source=data.get("hours_source"),
+        )
+
+
+@dataclass
+class CourseCatalogEntry:
+    """Eğitim Kataloğu (Bologna) üzerinden alınan ders saat ve değerlendirme kaydı."""
+
+    code: str
+    name: str
+    theoretical_hours: Optional[float] = None
+    practical_hours: Optional[float] = None
+    lab_hours: Optional[float] = None
+    credit: Optional[float] = None
+    ects: Optional[float] = None
+    midterm_weight: Optional[float] = None
+    final_weight: Optional[float] = None
+    assessments: list[dict[str, Any]] = field(default_factory=list)
+    program_id: Optional[int] = None
+    program_name: Optional[str] = None
+
+    @property
+    def total_practical_hours(self) -> Optional[float]:
+        """Uygulama + laboratuvar haftalık saat toplamını döndürür."""
+        if self.practical_hours is None and self.lab_hours is None:
+            return None
+        return (self.practical_hours or 0.0) + (self.lab_hours or 0.0)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "name": self.name,
+            "theoretical_hours": self.theoretical_hours,
+            "practical_hours": self.practical_hours,
+            "lab_hours": self.lab_hours,
+            "credit": self.credit,
+            "ects": self.ects,
+            "midterm_weight": self.midterm_weight,
+            "final_weight": self.final_weight,
+            "assessments": list(self.assessments),
+            "program_id": self.program_id,
+            "program_name": self.program_name,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CourseCatalogEntry:
+        raw_prog_id = data.get("program_id")
+        try:
+            prog_id = int(raw_prog_id) if raw_prog_id is not None else None
+        except (TypeError, ValueError):
+            prog_id = None
+        raw_assessments = data.get("assessments") or []
+        return cls(
+            code=str(data.get("code") or ""),
+            name=str(data.get("name") or ""),
+            theoretical_hours=_opt_float(data.get("theoretical_hours")),
+            practical_hours=_opt_float(data.get("practical_hours")),
+            lab_hours=_opt_float(data.get("lab_hours")),
+            credit=_opt_float(data.get("credit")),
+            ects=_opt_float(data.get("ects")),
+            midterm_weight=_opt_float(data.get("midterm_weight")),
+            final_weight=_opt_float(data.get("final_weight")),
+            assessments=[a for a in raw_assessments if isinstance(a, dict)],
+            program_id=prog_id,
+            program_name=data.get("program_name"),
         )
 
 
@@ -203,6 +280,7 @@ class GradeTargetAnalysis:
     targets: list[FinalTarget]
     max_possible_total: float
     max_possible_letter: str
+    weight_source: str = "default"
 
 
 @dataclass
@@ -269,3 +347,13 @@ class AttendanceReport:
     absent_percent: Optional[float]
     status: str
     risk_level: str  # "safe", "warning", "critical", "failed", "unknown"
+    hours_source: str = "unknown"
+    max_theory_days: Optional[int] = None
+    used_theory_days: Optional[float] = None
+    remaining_theory_days: Optional[int] = None
+    max_practice_days: Optional[int] = None
+    used_practice_days: Optional[float] = None
+    remaining_practice_days: Optional[int] = None
+    max_total_days: Optional[int] = None
+    used_total_days: Optional[float] = None
+    remaining_total_days: Optional[int] = None

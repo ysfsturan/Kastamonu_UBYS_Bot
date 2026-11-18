@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -96,7 +97,83 @@ def _parse_weight(raw: Optional[str], default: float, name: str) -> float:
         val = val / 100.0
     if val <= 0.0 or val >= 1.0:
         raise ConfigError(f"'{name}' 0 ile 1 (veya 1 ile 99) arasında olmalıdır: {raw!r}")
-    return val
+    return round(val, 4)
+
+
+def parse_weight_pair(raw: str, name: str = "WEIGHTS") -> tuple[float, float]:
+    """'30/70', '30-70', '0.3/0.7' veya tek başına '30'/'0.3' ağırlık çiftini ayrıştırır."""
+    cleaned = raw.strip()
+    if not cleaned:
+        raise ConfigError(f"'{name}' boş olamaz.")
+
+    parts = [p.strip() for p in re.split(r"[/\-]", cleaned) if p.strip()]
+    if len(parts) == 1:
+        mw = _parse_weight(parts[0], 0.40, name)
+        fw = round(1.0 - mw, 4)
+    elif len(parts) == 2:
+        mw = _parse_weight(parts[0], 0.40, f"{name}[vize]")
+        fw = _parse_weight(parts[1], 0.60, f"{name}[final]")
+    else:
+        raise ConfigError(
+            f"'{name}' için geçersiz ağırlık biçimi: {raw!r} (örnek: 30/70 veya 30)."
+        )
+
+    if abs((mw + fw) - 1.0) > 0.01:
+        raise ConfigError(
+            f"'{name}' vize ({mw}) ve final ({fw}) ağırlıkları toplamı 1.0 (veya %100) olmalıdır."
+        )
+    return mw, fw
+
+
+def _parse_course_weights(raw: Optional[str]) -> dict[str, tuple[float, float]]:
+    """'BPBZ201:30/70, BPBZ207:40/60' biçimindeki ders bazlı vize/final oranlarını okur."""
+    if raw is None or raw.strip() == "":
+        return {}
+    result: dict[str, tuple[float, float]] = {}
+    for entry in re.split(r"[,;\n]+", raw):
+        cleaned = entry.strip()
+        if not cleaned:
+            continue
+        match = re.split(r"[:=]", cleaned, maxsplit=1)
+        if len(match) != 2 or not match[0].strip() or not match[1].strip():
+            raise ConfigError(
+                f"'COURSE_WEIGHTS' için geçersiz kayıt: {cleaned!r} (örnek: BPBZ201:30/70)."
+            )
+        code = " ".join(match[0].split()).upper()
+        result[code] = parse_weight_pair(match[1], f"COURSE_WEIGHTS[{code}]")
+    return result
+
+
+def _parse_course_hours(raw: Optional[str]) -> dict[str, tuple[float, float]]:
+    """'BPBZ201:3+1, BPBZ207:4+0' biçimindeki ders bazlı haftalık T+U saatlerini okur."""
+    if raw is None or raw.strip() == "":
+        return {}
+    result: dict[str, tuple[float, float]] = {}
+    for entry in re.split(r"[,;\n]+", raw):
+        cleaned = entry.strip()
+        if not cleaned:
+            continue
+        match = re.split(r"[:=]", cleaned, maxsplit=1)
+        if len(match) != 2 or not match[0].strip() or not match[1].strip():
+            raise ConfigError(
+                f"'COURSE_HOURS' için geçersiz kayıt: {cleaned!r} (örnek: BPBZ201:3+1)."
+            )
+        code = " ".join(match[0].split()).upper()
+        val_parts = [p.strip() for p in re.split(r"[+/]", match[1].strip())]
+        if len(val_parts) == 1 and val_parts[0]:
+            t_hours = _parse_float(val_parts[0], 0.0, f"COURSE_HOURS[{code}][T]", minimum=0.0)
+            u_hours = 0.0
+        elif len(val_parts) == 2 and val_parts[0] and val_parts[1]:
+            t_hours = _parse_float(val_parts[0], 0.0, f"COURSE_HOURS[{code}][T]", minimum=0.0)
+            u_hours = _parse_float(val_parts[1], 0.0, f"COURSE_HOURS[{code}][U]", minimum=0.0)
+        else:
+            raise ConfigError(
+                f"'COURSE_HOURS[{code}]' için geçersiz saat biçimi: {match[1]!r} (örnek: 3+1)."
+            )
+        if t_hours + u_hours <= 0:
+            raise ConfigError(f"'COURSE_HOURS[{code}]' toplam saati 0'dan büyük olmalıdır.")
+        result[code] = (t_hours, u_hours)
+    return result
 
 
 @dataclass(frozen=True)
@@ -124,12 +201,16 @@ class Config:
     enable_calendar: bool = True
     enable_attendance: bool = True
     enable_transcript: bool = True
+    enable_catalog: bool = True
+    ubys_program: Optional[str] = None
     midterm_weight: float = 0.40
     final_weight: float = 0.60
     final_min_score: int = 0
+    course_weights: dict[str, tuple[float, float]] = field(default_factory=dict)
     semester_weeks: int = 14
     theory_min_attendance: int = 70
     practice_min_attendance: int = 80
+    course_hours: dict[str, tuple[float, float]] = field(default_factory=dict)
     sks_url: str = "https://sks.kastamonu.edu.tr/"
     dining_sheet_url: Optional[str] = None
     dining_notify_hour: int = 8
@@ -155,6 +236,7 @@ def load_config(
     enable_calendar = _parse_bool(os.getenv("ENABLE_CALENDAR"), True, "ENABLE_CALENDAR")
     enable_attendance = _parse_bool(os.getenv("ENABLE_ATTENDANCE"), True, "ENABLE_ATTENDANCE")
     enable_transcript = _parse_bool(os.getenv("ENABLE_TRANSCRIPT"), True, "ENABLE_TRANSCRIPT")
+    enable_catalog = _parse_bool(os.getenv("ENABLE_CATALOG"), True, "ENABLE_CATALOG")
     needs_ubys = enable_grades if require_ubys is None else require_ubys
 
     midterm_weight = _parse_weight(os.getenv("MIDTERM_WEIGHT"), 0.40, "MIDTERM_WEIGHT")
@@ -163,6 +245,9 @@ def load_config(
         raise ConfigError(
             f"MIDTERM_WEIGHT ({midterm_weight}) + FINAL_WEIGHT ({final_weight}) toplamı 1.0 (veya %100) olmalıdır."
         )
+    course_weights = _parse_course_weights(os.getenv("COURSE_WEIGHTS"))
+    course_hours = _parse_course_hours(os.getenv("COURSE_HOURS"))
+    ubys_program = os.getenv("UBYS_PROGRAM", "").strip() or None
 
     ubys_username = (os.getenv("UBYS_USERNAME") or os.getenv("OGRENCI_NO") or "").strip()
     ubys_password = (os.getenv("UBYS_PASSWORD") or os.getenv("SIFRE") or "").strip()
@@ -247,11 +332,14 @@ def load_config(
         enable_calendar=enable_calendar,
         enable_attendance=enable_attendance,
         enable_transcript=enable_transcript,
+        enable_catalog=enable_catalog,
+        ubys_program=ubys_program,
         midterm_weight=midterm_weight,
         final_weight=final_weight,
         final_min_score=_parse_int(
             os.getenv("FINAL_MIN_SCORE"), 0, "FINAL_MIN_SCORE", minimum=0, maximum=100
         ),
+        course_weights=course_weights,
         semester_weeks=_parse_int(
             os.getenv("SEMESTER_WEEKS"), 14, "SEMESTER_WEEKS", minimum=1, maximum=52
         ),
@@ -261,6 +349,7 @@ def load_config(
         practice_min_attendance=_parse_int(
             os.getenv("PRACTICE_MIN_ATTENDANCE"), 80, "PRACTICE_MIN_ATTENDANCE", minimum=1, maximum=100
         ),
+        course_hours=course_hours,
         sks_url=sks_url,
         dining_sheet_url=dining_sheet_url,
         dining_notify_hour=_parse_int(

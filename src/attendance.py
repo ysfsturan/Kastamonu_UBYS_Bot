@@ -35,13 +35,33 @@ def _max_absent_hours(weekly_hours: Optional[float], semester_weeks: int, allowe
     return float(math.floor((weekly_hours * semester_weeks * allowed_ratio) + 1e-9))
 
 
+def _hours_to_max_days(max_hours: Optional[float], weekly_hours: Optional[float]) -> Optional[int]:
+    """Toplam saat limitini muhafazakar şekilde tam gün/hafta sayısına çevirir (taban yuvarlama)."""
+    if max_hours is None or weekly_hours is None or weekly_hours <= 0:
+        return None
+    return int(math.floor((max_hours / weekly_hours) + 1e-9))
+
+
+def _hours_to_used_days(used_hours: Optional[float], weekly_hours: Optional[float]) -> Optional[float]:
+    if used_hours is None or weekly_hours is None or weekly_hours <= 0:
+        return None
+    return round(used_hours / weekly_hours, 2)
+
+
+def _hours_to_remaining_days(remaining_hours: Optional[float], weekly_hours: Optional[float]) -> Optional[int]:
+    """Kalan saat hakkını aşıma düşmemek için tam gün sayısına (taban) çevirir."""
+    if remaining_hours is None or weekly_hours is None or weekly_hours <= 0:
+        return None
+    return int(math.floor((remaining_hours / weekly_hours) + 1e-9))
+
+
 def evaluate_course_attendance(
     course: CourseGrade,
     semester_weeks: int = 14,
     theory_min_pct: int = 70,
     practice_min_pct: int = 80,
 ) -> AttendanceReport:
-    """Dersin haftalık teorik/uygulama saatine göre devamsızlık limitini ve kalan hakkı hesaplar."""
+    """Dersin haftalık teorik/uygulama saatine göre devamsızlık limitini (saat ve gün) hesaplar."""
     theory_absent_ratio = max(0.0, (100 - theory_min_pct) / 100.0)
     practice_absent_ratio = max(0.0, (100 - practice_min_pct) / 100.0)
 
@@ -49,12 +69,17 @@ def evaluate_course_attendance(
     weekly_practice = course.practical_hours
     estimated_from_credit = False
 
-    if weekly_theory is None and weekly_practice is None:
+    if weekly_theory is not None or weekly_practice is not None:
+        hours_source = course.hours_source or "ubys"
+    else:
         credit_val = _try_float(course.credit)
         if credit_val is not None and credit_val > 0:
             weekly_theory = credit_val
             weekly_practice = 0.0
             estimated_from_credit = True
+            hours_source = "estimated"
+        else:
+            hours_source = "unknown"
 
     has_theory = (weekly_theory or 0.0) > 0
     has_practice = (weekly_practice or 0.0) > 0
@@ -95,6 +120,38 @@ def evaluate_course_attendance(
         max(0.0, max_practice - used_practice) if (max_practice is not None and used_practice is not None) else None
     )
     rem_total = max(0.0, max_total - used_total) if (max_total is not None and used_total is not None) else None
+
+    max_theory_days = _hours_to_max_days(max_theory, weekly_theory)
+    used_theory_days = _hours_to_used_days(used_theory, weekly_theory)
+    rem_theory_days = _hours_to_remaining_days(rem_theory, weekly_theory)
+
+    max_practice_days = _hours_to_max_days(max_practice, weekly_practice)
+    used_practice_days = _hours_to_used_days(used_practice, weekly_practice)
+    rem_practice_days = _hours_to_remaining_days(rem_practice, weekly_practice)
+
+    max_total_days: Optional[int] = None
+    used_total_days: Optional[float] = None
+    rem_total_days: Optional[int] = None
+
+    if has_theory and not has_practice:
+        max_total_days = max_theory_days
+        used_total_days = used_theory_days
+        rem_total_days = rem_theory_days
+    elif has_practice and not has_theory:
+        max_total_days = max_practice_days
+        used_total_days = used_practice_days
+        rem_total_days = rem_practice_days
+    elif has_theory and has_practice:
+        if max_theory_days is not None and max_practice_days is not None:
+            max_total_days = min(max_theory_days, max_practice_days)
+        if rem_theory_days is not None and rem_practice_days is not None:
+            rem_total_days = min(rem_theory_days, rem_practice_days)
+            used_total_days = round(max(used_theory_days or 0.0, used_practice_days or 0.0), 2)
+        elif used_total is not None and max_total_days is not None:
+            weekly_sum = (weekly_theory or 0.0) + (weekly_practice or 0.0)
+            used_total_days = _hours_to_used_days(used_total, weekly_sum)
+            if used_total_days is not None:
+                rem_total_days = max(0, max_total_days - math.ceil(used_total_days - 1e-9))
 
     status_text = course.attendance_status or ""
     if not status_text and course.status:
@@ -137,13 +194,22 @@ def evaluate_course_attendance(
         )
         if m is not None and r is not None
     ]
+    known_rem_days = [
+        d for d in (rem_theory_days, rem_practice_days, rem_total_days) if d is not None
+    ]
 
     if "devamsız" in lower_status or "devamsiz" in lower_status or failed_by_hours or failed_by_pct:
         risk_level = "failed"
-    elif any(r <= 1.0 + 1e-9 for _, r in known_pairs):
+    elif any(d <= 0 for d in known_rem_days) or any(r <= 1.0 + 1e-9 for _, r in known_pairs):
         risk_level = "critical"
-    elif any(r <= 2.0 + 1e-9 or (m > 0 and (r / m) <= 0.25) for m, r in known_pairs) or (
-        absent_pct is not None and allowed_pct_limit is not None and absent_pct >= (allowed_pct_limit * 0.75)
+    elif (
+        any(d <= 1 for d in known_rem_days)
+        or any(r <= 2.0 + 1e-9 or (m > 0 and (r / m) <= 0.25) for m, r in known_pairs)
+        or (
+            absent_pct is not None
+            and allowed_pct_limit is not None
+            and absent_pct >= (allowed_pct_limit * 0.75)
+        )
     ):
         risk_level = "warning"
     elif "devamlı" in lower_status or "devamli" in lower_status or "muaf" in lower_status or known_pairs or absent_pct is not None:
@@ -170,6 +236,16 @@ def evaluate_course_attendance(
         absent_percent=absent_pct,
         status=status_text,
         risk_level=risk_level,
+        hours_source=hours_source,
+        max_theory_days=max_theory_days,
+        used_theory_days=used_theory_days,
+        remaining_theory_days=rem_theory_days,
+        max_practice_days=max_practice_days,
+        used_practice_days=used_practice_days,
+        remaining_practice_days=rem_practice_days,
+        max_total_days=max_total_days,
+        used_total_days=used_total_days,
+        remaining_total_days=rem_total_days,
     )
 
 

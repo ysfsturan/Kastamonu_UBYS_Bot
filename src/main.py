@@ -25,7 +25,8 @@ from .calendar_tracker import (
     find_ongoing_and_upcoming,
     milestone_key_for,
 )
-from .config import Config, ConfigError, load_config
+from .config import Config, ConfigError, load_config, parse_weight_pair
+from .course_catalog import enrich_courses_with_catalog, fetch_catalog_for_courses
 from .differ import (
     STATE_SCHEMA_VERSION,
     StateStorageError,
@@ -39,10 +40,11 @@ from .dining import (
     get_menu_for_date,
     get_next_menu,
 )
-from .grade_calculator import analyze_course_grades, calculate_final_targets
+from .grade_calculator import analyze_course_grades, calculate_final_targets, resolve_course_weights
 from .models import (
     AttendanceReport,
     CalendarEvent,
+    CourseCatalogEntry,
     CourseGrade,
     DailyMenu,
     GradeTargetAnalysis,
@@ -51,6 +53,7 @@ from .models import (
 from .notifier import (
     TelegramNotifier,
     format_attendance_alerts,
+    format_attendance_detail_line,
     format_attendance_report,
     format_baseline_summary,
     format_calendar_digest,
@@ -143,6 +146,19 @@ def _print_courses_table(courses: list[CourseGrade], config: Optional[Config] = 
             print("    - Sınav kaydı yok")
 
         summary_parts: list[str] = []
+        if course.theoretical_hours is not None or course.practical_hours is not None:
+            t_h = course.theoretical_hours or 0.0
+            u_h = course.practical_hours or 0.0
+            summary_parts.append(f"Saat: {t_h:g}T+{u_h:g}U")
+        def_mw = config.midterm_weight if config is not None else 0.40
+        def_fw = config.final_weight if config is not None else 0.60
+        mw, fw, w_src = resolve_course_weights(
+            course,
+            default_midterm_weight=def_mw,
+            default_final_weight=def_fw,
+        )
+        if w_src != "default":
+            summary_parts.append(f"Vize/Final: %{round(mw * 100)}/%{round(fw * 100)}")
         if course.passing_grade:
             summary_parts.append(f"Geçme Notu: {course.passing_grade}")
         if course.letter_grade:
@@ -168,7 +184,9 @@ def _print_courses_table(courses: list[CourseGrade], config: Optional[Config] = 
                     if t.status != "impossible"
                 )
                 if targets_txt:
-                    print(f"  Final Hedefleri: {targets_txt} (Maks: {analysis.max_possible_total:.2f})")
+                    mw_pct = round(analysis.midterm_weight * 100)
+                    fw_pct = round(analysis.final_weight * 100)
+                    print(f"  Final Hedefleri (%{mw_pct}/%{fw_pct}): {targets_txt} (Maks: {analysis.max_possible_total:.2f})")
             elif estimate is not None:
                 print(
                     f"  Tahmini Ortalama: {estimate.weighted_total:.2f} -> {estimate.letter_grade} ({estimate.coefficient:.2f})"
@@ -200,21 +218,8 @@ def _print_attendance_reports(reports: list[AttendanceReport]) -> None:
         return
     for report in reports:
         title = f"{report.course_code} - {report.course_name}" if report.course_code else report.course_name
-        print(f"• [{report.risk_level.upper()}] {title} ({report.course_type})")
-        if report.max_theory_absent is not None and report.max_practice_absent is not None:
-            print(
-                f"  Teorik: {report.used_theory_absent if report.used_theory_absent is not None else '-'}/{report.max_theory_absent:g}"
-                f" (Kalan: {report.remaining_theory if report.remaining_theory is not None else '-'}) | "
-                f"Uygulama: {report.used_practice_absent if report.used_practice_absent is not None else '-'}/{report.max_practice_absent:g}"
-                f" (Kalan: {report.remaining_practice if report.remaining_practice is not None else '-'})"
-            )
-        elif report.max_total_absent is not None:
-            used_str = f"{report.used_total_absent:g}" if report.used_total_absent is not None else "-"
-            rem_str = f"{report.remaining_total:g}" if report.remaining_total is not None else "-"
-            print(f"  Devamsızlık: {used_str}/{report.max_total_absent:g} saat (Kalan: {rem_str} saat)")
-        if report.absent_percent is not None or report.status != "Bilinmiyor":
-            pct_str = f" | Oran: %{report.absent_percent:g}" if report.absent_percent is not None else ""
-            print(f"  Durum: {report.status}{pct_str}")
+        print(f"• [{report.risk_level.upper()}] {title}")
+        print(f"  {format_attendance_detail_line(report)}")
 
 
 def _print_transcript_summary(summary: TranscriptSummary) -> None:
@@ -331,6 +336,109 @@ def _apply_error_to_state(
     return updated
 
 
+CATALOG_CACHE_TTL_DAYS = 14
+
+
+def _norm_course_code(code: Optional[str]) -> str:
+    return " ".join(str(code or "").split()).upper()
+
+
+def _enrich_courses_with_catalog_cached(
+    config: Config,
+    courses: list[CourseGrade],
+    program_hints: Optional[list[str]] = None,
+    swiss_state: Optional[dict[str, Any]] = None,
+    current_dt: Optional[datetime] = None,
+) -> bool:
+    """Dersleri Eğitim Kataloğu (14 günlük Gist önbellekli) ve manuel oranlarla zenginleştirir."""
+    if not courses:
+        return False
+
+    enrolled_codes = {_norm_course_code(c.code) for c in courses if _norm_course_code(c.code)}
+    today = (current_dt or now_tr()).date()
+    today_str = today.isoformat()
+    desired_override = config.ubys_program or None
+
+    catalog_entries: dict[str, CourseCatalogEntry] = {}
+    cache_dirty = False
+
+    if config.enable_catalog and enrolled_codes:
+        cache = swiss_state.get("course_catalog") if isinstance(swiss_state, dict) else None
+        cached_entries: dict[str, CourseCatalogEntry] = {}
+        cache_is_valid = False
+
+        if isinstance(cache, dict):
+            raw_entries = cache.get("entries") or {}
+            if isinstance(raw_entries, dict):
+                for k, v in raw_entries.items():
+                    if isinstance(v, dict):
+                        norm_k = _norm_course_code(k)
+                        if norm_k:
+                            cached_entries[norm_k] = CourseCatalogEntry.from_dict(v)
+
+            not_found = {
+                _norm_course_code(x)
+                for x in (cache.get("not_found") or [])
+                if _norm_course_code(x)
+            }
+            updated_date_str = str(cache.get("updated_date") or "")
+            cached_override = cache.get("program_override") or None
+
+            try:
+                cached_date = date.fromisoformat(updated_date_str)
+                age_days = (today - cached_date).days
+            except ValueError:
+                age_days = CATALOG_CACHE_TTL_DAYS + 1
+
+            covered_codes = set(cached_entries) | not_found
+            if (
+                age_days <= CATALOG_CACHE_TTL_DAYS
+                and cached_override == desired_override
+                and enrolled_codes.issubset(covered_codes)
+            ):
+                cache_is_valid = True
+
+        if cache_is_valid:
+            catalog_entries = cached_entries
+        else:
+            try:
+                fetched_entries, prog_id, _ = fetch_catalog_for_courses(
+                    courses=courses,
+                    base_url=config.ubys_base_url,
+                    program_hints=program_hints or [],
+                    program_override=desired_override,
+                )
+                catalog_entries = fetched_entries
+                logger.info(
+                    "Eğitim Kataloğu verileri güncellendi (%d/%d ders eşleşti).",
+                    len(fetched_entries),
+                    len(enrolled_codes),
+                )
+                if swiss_state is not None:
+                    swiss_state["course_catalog"] = {
+                        "updated_date": today_str,
+                        "program_id": prog_id,
+                        "program_override": desired_override,
+                        "entries": {k: v.to_dict() for k, v in fetched_entries.items()},
+                        "not_found": sorted(enrolled_codes - set(fetched_entries)),
+                    }
+                    cache_dirty = True
+            except Exception as exc:
+                logger.warning(
+                    "Eğitim Kataloğu verisi çekilemedi (ÜBYS/varsayılan değerler kullanılacak): %s",
+                    exc,
+                )
+                catalog_entries = cached_entries
+
+    enrich_courses_with_catalog(
+        courses=courses,
+        catalog_entries=catalog_entries,
+        course_weights_overrides=config.course_weights,
+        course_hours_overrides=config.course_hours,
+    )
+    return cache_dirty
+
+
 def _run_grades_module(
     config: Config,
     state: dict[str, Any],
@@ -339,6 +447,7 @@ def _run_grades_module(
     """ÜBYS not kontrolünü çalıştırır -> (başarılı_mı, durum_değişti_mi, güncel_state, dersler, gano)."""
     dump_dir = Path("debug_html") if dump_html else None
     last_home_gano: Optional[float] = None
+    program_hints: list[str] = []
 
     try:
         with UBYSClient(base_url=config.ubys_base_url) as client:
@@ -357,6 +466,7 @@ def _run_grades_module(
             )
             raw_gano = client.last_home_gano
             last_home_gano = float(raw_gano) if isinstance(raw_gano, (int, float)) else None
+            program_hints = client.student_program_hints
             logger.info("Toplam %d ders çekildi.", len(courses))
 
     except (LoginError, TwoFactorRequiredError, CaptchaRequiredError) as exc:
@@ -380,6 +490,15 @@ def _run_grades_module(
         return False, True, _apply_error_to_state(config, state, exc), [], None
 
     updated = copy.deepcopy(state)
+    swiss_state = dict(updated.get("swiss_tool") or {})
+    if _enrich_courses_with_catalog_cached(
+        config=config,
+        courses=courses,
+        program_hints=program_hints,
+        swiss_state=swiss_state,
+    ):
+        updated["swiss_tool"] = swiss_state
+
     is_first_run = not updated.get("baseline_initialized", False)
 
     if is_first_run:
@@ -669,6 +788,7 @@ def run_attendance_preview(
 ) -> int:
     """Aktif dönem derslerinin devamsızlık raporunu ekrana (ve isteğe bağlı Telegram'a) yazdırır."""
     dump_dir = Path("debug_html") if dump_html else None
+    program_hints: list[str] = []
     try:
         with UBYSClient(base_url=config.ubys_base_url) as client:
             client.login(
@@ -682,10 +802,12 @@ def run_attendance_preview(
                 request_delay=config.request_delay_seconds,
                 dump_dir=dump_dir,
             )
+            program_hints = client.student_program_hints
     except Exception as exc:
         logger.error("Devamsızlık verileri çekilemedi: %s", exc)
         return 1
 
+    _enrich_courses_with_catalog_cached(config=config, courses=courses, program_hints=program_hints)
     reports = evaluate_all_attendance(
         courses,
         semester_weeks=config.semester_weeks,
@@ -700,17 +822,33 @@ def run_attendance_preview(
     return 0
 
 
-def run_calc_preview(config: Config, midterm_score: float, notify_test: bool = False) -> int:
+def run_calc_preview(
+    config: Config,
+    midterm_score: float,
+    notify_test: bool = False,
+    weights_raw: Optional[str] = None,
+) -> int:
     """Verilen vize notuna göre final hedeflerini hesaplar ve yazdırır."""
     if midterm_score < 0 or midterm_score > 100:
         logger.error("Vize notu 0 ile 100 arasında olmalıdır (verilen: %s).", midterm_score)
         return 2
 
+    mw, fw = config.midterm_weight, config.final_weight
+    weight_src = "default"
+    if weights_raw:
+        try:
+            mw, fw = parse_weight_pair(weights_raw, "--weights")
+            weight_src = "manual"
+        except ConfigError as exc:
+            logger.error("%s", exc)
+            return 2
+
     analysis = calculate_final_targets(
         midterm_score=midterm_score,
-        midterm_weight=config.midterm_weight,
-        final_weight=config.final_weight,
+        midterm_weight=mw,
+        final_weight=fw,
         final_min_score=config.final_min_score,
+        weight_source=weight_src,
     )
     _print_grade_calculator(analysis)
     if notify_test:
@@ -726,6 +864,7 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
 
     if config.enable_grades:
         transcript_summary: Optional[TranscriptSummary] = None
+        program_hints: list[str] = []
         try:
             with UBYSClient(base_url=config.ubys_base_url) as client:
                 logger.info("Kastamonu ÜBYS'ye giriş yapılıyor (%s)...", config.ubys_base_url)
@@ -740,12 +879,18 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                     request_delay=config.request_delay_seconds,
                     dump_dir=dump_dir,
                 )
+                program_hints = client.student_program_hints
                 if config.enable_transcript:
                     try:
                         transcript_summary = client.fetch_transcript(dump_dir=dump_dir)
                     except Exception as t_exc:
                         logger.warning("Transkript alınamadı: %s", t_exc)
 
+            _enrich_courses_with_catalog_cached(
+                config=config,
+                courses=courses,
+                program_hints=program_hints,
+            )
             _print_courses_table(courses, config=config)
             if notify_test:
                 if not _send_telegram_safe(config, format_test_summary(courses)):
@@ -963,6 +1108,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Girilen vize notuna göre finalden gereken puanları hesaplar (çevrimdışı çalışır).",
     )
     parser.add_argument(
+        "--weights",
+        metavar="VIZE/FINAL",
+        help="--calc ile vize/final yüzdelerini belirtir (örnek: --calc 80 --weights 30/70).",
+    )
+    parser.add_argument(
         "--notify-test",
         action="store_true",
         help="--test, --dining, --calendar, --transcript, --attendance veya --calc ile Telegram'a gönderir.",
@@ -1010,7 +1160,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     if args.calc is not None:
-        return run_calc_preview(config, args.calc, notify_test=args.notify_test)
+        return run_calc_preview(
+            config,
+            args.calc,
+            notify_test=args.notify_test,
+            weights_raw=args.weights,
+        )
     if args.dining:
         return run_dining_preview(config, notify_test=args.notify_test)
     if args.calendar:

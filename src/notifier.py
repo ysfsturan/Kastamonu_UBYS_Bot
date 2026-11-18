@@ -11,7 +11,7 @@ from typing import Any, Iterable, Optional
 
 import httpx
 
-from .grade_calculator import analyze_course_grades
+from .grade_calculator import analyze_course_grades, resolve_course_weights
 from .models import (
     AttendanceReport,
     CalendarEvent,
@@ -289,6 +289,9 @@ def _format_course_summary_lines(courses: list[CourseGrade], max_courses: int = 
             extras.append(", ".join(scored_exams))
         if course.letter_grade:
             extras.append(f"Harf: {course.letter_grade}")
+        mw, fw, weight_src = resolve_course_weights(course)
+        if weight_src != "default":
+            extras.append(f"Vize/Final: %{round(mw * 100)}/%{round(fw * 100)}")
         if course.status:
             extras.append(course.status)
 
@@ -592,21 +595,111 @@ def _fmt_hours(val: Optional[float]) -> str:
     return f"{val:g}"
 
 
-def _format_attendance_detail_line(report: AttendanceReport) -> str:
-    parts: list[str] = [report.course_type]
-    if report.max_theory_absent is not None and report.max_practice_absent is not None:
-        t_part = f"Teorik: {_fmt_hours(report.used_theory_absent)}/{_fmt_hours(report.max_theory_absent)}"
-        if report.remaining_theory is not None:
-            t_part += f" (Kalan {_fmt_hours(report.remaining_theory)})"
-        u_part = f"Uyg: {_fmt_hours(report.used_practice_absent)}/{_fmt_hours(report.max_practice_absent)}"
-        if report.remaining_practice is not None:
-            u_part += f" (Kalan {_fmt_hours(report.remaining_practice)})"
-        parts.extend([t_part, u_part])
+def _fmt_days(val: Optional[float | int]) -> str:
+    if val is None:
+        return "-"
+    if isinstance(val, int):
+        return str(val)
+    if abs(val - round(val)) < 1e-6:
+        return str(int(round(val)))
+    return f"{val:g}"
+
+
+def _format_weekly_hours_tag(report: AttendanceReport) -> str:
+    t = report.weekly_theory or 0.0
+    u = report.weekly_practice or 0.0
+    if t > 0 and u > 0:
+        return f"{t:g}T+{u:g}U"
+    if t > 0:
+        return f"{t:g}T"
+    if u > 0:
+        return f"{u:g}U"
+    return ""
+
+
+def format_attendance_detail_line(report: AttendanceReport) -> str:
+    """Devamsızlık raporunun tek satırlık gün ve saat özetini üretir."""
+    weekly_tag = _format_weekly_hours_tag(report)
+    if weekly_tag and report.course_type.endswith(")"):
+        type_label = f"{report.course_type[:-1]} | {weekly_tag})"
+    else:
+        type_label = report.course_type
+
+    parts: list[str] = [type_label]
+    if (
+        report.max_theory_absent is not None
+        and report.max_practice_absent is not None
+        and (report.weekly_practice or 0.0) > 0
+    ):
+        if (
+            report.used_theory_absent is not None
+            and report.used_practice_absent is not None
+            and report.remaining_theory_days is not None
+            and report.remaining_practice_days is not None
+        ):
+            t_rem_txt = (
+                f"Kalan: {_fmt_days(report.remaining_theory_days)} gün"
+                if report.remaining_theory_days > 0
+                else "Kalan: 0 tam gün"
+            )
+            u_rem_txt = (
+                f"Kalan: {_fmt_days(report.remaining_practice_days)} gün"
+                if report.remaining_practice_days > 0
+                else "Kalan: 0 tam gün"
+            )
+            t_part = (
+                f"Teorik: {_fmt_days(report.used_theory_days)}/{_fmt_days(report.max_theory_days)} gün "
+                f"({t_rem_txt} / {_fmt_hours(report.remaining_theory)}s)"
+            )
+            u_part = (
+                f"Uyg: {_fmt_days(report.used_practice_days)}/{_fmt_days(report.max_practice_days)} gün "
+                f"({u_rem_txt} / {_fmt_hours(report.remaining_practice)}s)"
+            )
+            parts.extend([t_part, u_part])
+        elif report.used_total_absent is not None:
+            rem_days_txt = (
+                f"{_fmt_days(report.remaining_total_days)} gün"
+                if report.remaining_total_days is not None
+                else "-"
+            )
+            parts.append(
+                f"Kullanılan: {_fmt_hours(report.used_total_absent)} saat | Kalan tam gün: {rem_days_txt} • "
+                f"Limit: Teorik {_fmt_days(report.max_theory_days)} gün ({_fmt_hours(report.max_theory_absent)}s), "
+                f"Uyg {_fmt_days(report.max_practice_days)} gün ({_fmt_hours(report.max_practice_absent)}s)"
+            )
+        else:
+            full_days_txt = (
+                f" • Tam gün: {_fmt_days(report.max_total_days)} gün hakkın var"
+                if report.max_total_days is not None
+                else ""
+            )
+            parts.append(
+                f"Hak: Teorik {_fmt_days(report.max_theory_days)} gün ({_fmt_hours(report.max_theory_absent)} saat), "
+                f"Uyg {_fmt_days(report.max_practice_days)} gün ({_fmt_hours(report.max_practice_absent)} saat)"
+                f"{full_days_txt}"
+            )
     elif report.max_total_absent is not None:
         if report.used_total_absent is not None and report.remaining_total is not None:
+            if report.max_total_days is not None and report.remaining_total_days is not None:
+                if report.remaining_total_days > 0:
+                    rem_desc = (
+                        f"Kalan: {_fmt_days(report.remaining_total_days)} gün hakkın var "
+                        f"({_fmt_hours(report.remaining_total)} saat)"
+                    )
+                else:
+                    rem_desc = f"Kalan: 0 tam gün ({_fmt_hours(report.remaining_total)} saat)"
+                parts.append(
+                    f"Kullanılan: {_fmt_days(report.used_total_days)}/{_fmt_days(report.max_total_days)} gün "
+                    f"({_fmt_hours(report.used_total_absent)}/{_fmt_hours(report.max_total_absent)} saat) | {rem_desc}"
+                )
+            else:
+                parts.append(
+                    f"Devamsızlık: {_fmt_hours(report.used_total_absent)}/{_fmt_hours(report.max_total_absent)} saat "
+                    f"(Kalan: {_fmt_hours(report.remaining_total)} saat)"
+                )
+        elif report.max_total_days is not None:
             parts.append(
-                f"Devamsızlık: {_fmt_hours(report.used_total_absent)}/{_fmt_hours(report.max_total_absent)} saat "
-                f"(Kalan: {_fmt_hours(report.remaining_total)} saat)"
+                f"{_fmt_days(report.max_total_days)} gün hakkın var ({_fmt_hours(report.max_total_absent)} saat)"
             )
         else:
             parts.append(f"Maks. Hak: {_fmt_hours(report.max_total_absent)} saat")
@@ -628,7 +721,7 @@ def format_attendance_report(reports: list[AttendanceReport], base_url: str) -> 
             icon = _ATTENDANCE_ICONS.get(report.risk_level, "⚪")
             title = f"{report.course_code} - {report.course_name}" if report.course_code else report.course_name
             lines.append(f"{icon} <b>{html.escape(title)}</b>")
-            lines.append(f"   └ {html.escape(_format_attendance_detail_line(report))}")
+            lines.append(f"   └ {html.escape(format_attendance_detail_line(report))}")
 
     lines.append("")
     lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
@@ -646,12 +739,21 @@ def format_attendance_alerts(
         title = f"{report.course_code} - {report.course_name}" if report.course_code else report.course_name
         lines.append(f"{icon} <b>{html.escape(title)}</b>")
         if old_hours is not None and report.used_total_absent is not None and report.used_total_absent > old_hours:
-            lines.append(
-                f"   └ Kullanılan: <code>{_fmt_hours(old_hours)}</code> → <code>{_fmt_hours(report.used_total_absent)}</code> saat"
-            )
+            weekly_sum = (report.weekly_theory or 0.0) + (report.weekly_practice or 0.0)
+            if weekly_sum > 0:
+                old_d = _fmt_days(round(old_hours / weekly_sum, 2))
+                new_d = _fmt_days(round(report.used_total_absent / weekly_sum, 2))
+                lines.append(
+                    f"   └ Kullanılan: <code>{old_d}</code> → <code>{new_d}</code> gün "
+                    f"(<code>{_fmt_hours(old_hours)}</code> → <code>{_fmt_hours(report.used_total_absent)}</code> saat)"
+                )
+            else:
+                lines.append(
+                    f"   └ Kullanılan: <code>{_fmt_hours(old_hours)}</code> → <code>{_fmt_hours(report.used_total_absent)}</code> saat"
+                )
         elif old_status and report.status != old_status:
             lines.append(f"   └ Durum: {html.escape(old_status)} → <b>{html.escape(report.status)}</b>")
-        lines.append(f"   └ {html.escape(_format_attendance_detail_line(report))}")
+        lines.append(f"   └ {html.escape(format_attendance_detail_line(report))}")
         lines.append("")
 
     lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')

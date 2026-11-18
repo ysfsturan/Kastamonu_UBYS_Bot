@@ -24,6 +24,7 @@ from .ubys_parser import (
     parse_grades_index,
     parse_sap_id,
     parse_student_gano,
+    parse_student_program_hints,
     parse_transcript,
     parse_transcript_url,
 )
@@ -81,11 +82,17 @@ class UBYSClient:
         self._sap_id: Optional[str] = None
         self._last_home_gano: Optional[float] = None
         self._transcript_url: Optional[str] = None
+        self._program_hints: list[str] = []
 
     @property
     def last_home_gano(self) -> Optional[float]:
         """Ana sayfadan okunan son GANO bilgisini döndürür."""
         return self._last_home_gano
+
+    @property
+    def student_program_hints(self) -> list[str]:
+        """Öğrencinin kayıtlı program/bölüm ipuçlarını döndürür."""
+        return list(self._program_hints)
 
     def __enter__(self) -> UBYSClient:
         return self
@@ -99,6 +106,7 @@ class UBYSClient:
         self._sap_id = None
         self._last_home_gano = None
         self._transcript_url = None
+        self._program_hints = []
 
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -254,6 +262,7 @@ class UBYSClient:
         self._sap_id = parse_sap_id(home_resp.text)
         self._last_home_gano = parse_student_gano(home_resp.text)
         self._transcript_url = parse_transcript_url(home_resp.text)
+        self._program_hints = parse_student_program_hints(home_resp.text)
         return home_resp.text
 
     def fetch_grades(
@@ -286,6 +295,10 @@ class UBYSClient:
 
         if dump_dir is not None:
             (dump_dir / "class_index.html").write_text(class_resp.text, encoding="utf-8")
+
+        for hint in parse_student_program_hints(class_resp.text):
+            if hint not in self._program_hints:
+                self._program_hints.append(hint)
 
         courses = parse_grades_index(class_resp.text)
 
