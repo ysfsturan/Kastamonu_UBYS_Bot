@@ -119,7 +119,6 @@ Kendi `Fork`ladığın deponun sayfasına dön:
 | `GIST_ID` | Adım 3'te oluşturduğun Secret Gist'in ID kodu | — |
 | `GIST_TOKEN` | Adım 3'te aldığın sadece `gist` yetkili `ghp_...` token | — |
 
-*(Halihazırda eski kurulumdan kalan `OGRENCI_NO`, `SIFRE`, `BOT_TOKEN`, `CHAT_ID` isimlerini kullanıyorsan değiştirmene gerek yok, bot ikisini de otomatik tanır.)*
 
 ### Adım 5: Botu Aç ve İlk Testi Yap!
 1. Deponun üst menüsünden **Actions** sekmesine tıkla.
