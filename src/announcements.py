@@ -38,7 +38,9 @@ class AnnouncementError(Exception):
 def _clean_text(raw: Optional[str]) -> str:
     if not raw:
         return ""
-    return " ".join(raw.split())
+    cleaned = " ".join(raw.split())
+    cleaned = re.sub(r"\s+([’'])", r"\1", cleaned)
+    return re.sub(r"([A-Za-zÇĞİÖŞÜçğıöşü0-9][’'])\s+(?=[a-zçğıöşü])", r"\1", cleaned)
 
 
 def _fold_tr(text: str) -> str:
@@ -96,6 +98,9 @@ def parse_announcements_html(
         if canon in seen_urls:
             return
         seen_urls.add(canon)
+        cleaned_sum = _clean_text(summary)[:200]
+        if len(re.sub(r"[^0-9A-Za-zÇĞİÖŞÜçğıöşü]+", "", cleaned_sum)) < 4:
+            cleaned_sum = ""
         results.append(
             Announcement(
                 announcement_id=make_announcement_id(source_name, abs_url, cleaned_title),
@@ -103,7 +108,7 @@ def parse_announcements_html(
                 title=cleaned_title,
                 url=abs_url,
                 published_date=_clean_text(pub_date) or None,
-                summary=_clean_text(summary)[:200],
+                summary=cleaned_sum,
             )
         )
 

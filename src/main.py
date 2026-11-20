@@ -1065,7 +1065,11 @@ def _run_weekly_briefing_module(
     return False
 
 
-def run_dining_preview(config: Config, notify_test: bool = False) -> int:
+def run_dining_preview(
+    config: Config,
+    notify_test: bool = False,
+    weather_override: Optional[WeatherForecast] = None,
+) -> int:
     """Sadece yemekhane menüsünü (+ hava durumunu) çekip ekrana (ve isteğe bağlı Telegram'a) yazdırır."""
     today = now_tr().date()
     try:
@@ -1083,7 +1087,7 @@ def run_dining_preview(config: Config, notify_test: bool = False) -> int:
         menu = get_next_menu(menus, today)
         is_next_preview = menu is not None
 
-    weather = _get_weather_safe(config)
+    weather = weather_override if weather_override is not None else _get_weather_safe(config)
     _print_dining_menu(menu, is_next_preview=is_next_preview, weather=weather)
     if notify_test and menu is not None:
         if not _send_telegram_safe(
@@ -1545,11 +1549,13 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
     overall_ok = True
     dump_dir = Path("debug_html") if dump_html else None
     home_anns: list[Announcement] = []
+    module_statuses: list[str] = []
 
     if config.enable_grades:
         transcript_summary: Optional[TranscriptSummary] = None
         slots: list[ScheduleSlot] = []
         exams: list[ExamScheduleItem] = []
+        home_routes: list[str] = []
         program_hints: list[str] = []
         base_gano: Optional[float] = None
         try:
@@ -1570,6 +1576,7 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                 base_gano = client.last_home_gano
                 program_hints = client.student_program_hints
                 home_anns = client.home_announcements
+                home_routes = client.home_routes
                 if config.enable_transcript:
                     try:
                         transcript_summary = client.fetch_transcript(dump_dir=dump_dir)
@@ -1586,12 +1593,16 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                     except Exception:
                         pass
 
+            if ((config.enable_schedule and not slots) or (config.enable_exam_schedule and not exams)) and home_routes:
+                logger.info("ÜBYS ana sayfada keşfedilen statik rotalar: %s", ", ".join(home_routes[:20]))
+
             _enrich_courses_with_catalog_cached(
                 config=config,
                 courses=courses,
                 program_hints=program_hints,
             )
             _print_courses_table(courses, config=config)
+            module_statuses.append(f"• 📚 <b>Not Takibi:</b> ✅ {len(courses)} ders")
             if notify_test:
                 if not _send_telegram_safe(config, format_test_summary(courses)):
                     overall_ok = False
@@ -1604,6 +1615,7 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                     practice_min_pct=config.practice_min_attendance,
                 )
                 _print_attendance_reports(reports)
+                module_statuses.append(f"• 📋 <b>Devamsızlık Takibi:</b> ✅ {len(reports)} ders (gün/saat)")
                 if notify_test:
                     if not _send_telegram_safe(config, format_attendance_report(reports, config.ubys_base_url)):
                         overall_ok = False
@@ -1623,45 +1635,83 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                 )
                 if proj.projected_yano is not None:
                     _print_gpa_projection(proj)
+                    module_statuses.append(f"• 📊 <b>YANO Projeksiyonu:</b> ✅ YANO {proj.projected_yano:.2f}")
                     if notify_test:
                         if not _send_telegram_safe(config, format_gpa_projection(proj, config.ubys_base_url)):
                             overall_ok = False
+                else:
+                    module_statuses.append("• 📊 <b>YANO Projeksiyonu:</b> ℹ️ Final/harf notu girilince hesaplanır")
 
             if transcript_summary is not None:
                 _print_transcript_summary(transcript_summary)
+                gano_note = f"GANO {transcript_summary.gano:.2f}" if transcript_summary.gano is not None else "Hazır"
+                module_statuses.append(f"• 🎓 <b>Transkript:</b> ✅ {gano_note}")
                 if notify_test:
                     if not _send_telegram_safe(
                         config, format_transcript_summary(transcript_summary, config.ubys_base_url)
                     ):
                         overall_ok = False
 
-            if slots:
-                _print_weekly_schedule(slots)
-                if notify_test:
-                    if not _send_telegram_safe(config, format_weekly_schedule(slots, config.ubys_base_url)):
-                        overall_ok = False
+            if config.enable_schedule:
+                if slots:
+                    _print_weekly_schedule(slots)
+                    module_statuses.append(f"• 🗓️ <b>Ders Programı:</b> ✅ {len(slots)} ders saati")
+                    if notify_test:
+                        if not _send_telegram_safe(config, format_weekly_schedule(slots, config.ubys_base_url)):
+                            overall_ok = False
+                else:
+                    module_statuses.append("• 🗓️ <b>Ders Programı:</b> ℹ️ ÜBYS sayfasında kayıt bulunamadı")
 
-            if exams:
-                _print_exam_schedule(exams)
-                if notify_test:
-                    if not _send_telegram_safe(
-                        config, format_exam_schedule(exams, now_tr().date(), config.ubys_base_url)
-                    ):
-                        overall_ok = False
+            if config.enable_exam_schedule:
+                if exams:
+                    _print_exam_schedule(exams)
+                    module_statuses.append(f"• 📝 <b>Sınav Takvimi:</b> ✅ {len(exams)} sınav")
+                    if notify_test:
+                        if not _send_telegram_safe(
+                            config, format_exam_schedule(exams, now_tr().date(), config.ubys_base_url)
+                        ):
+                            overall_ok = False
+                else:
+                    module_statuses.append("• 📝 <b>Sınav Takvimi:</b> ℹ️ ÜBYS'de yayınlanmış sınav bulunamadı")
+
+            if config.enable_materials:
+                mat_count = sum(len(c.materials) for c in courses)
+                module_statuses.append(
+                    f"• 📂 <b>Ders Materyalleri / Ödev:</b> ✅ {mat_count} öğe"
+                    if mat_count
+                    else "• 📂 <b>Ders Materyalleri / Ödev:</b> ℹ️ Şu an ekli dosya/ödev yok"
+                )
         except Exception as exc:
             logger.error("ÜBYS testi başarısız: %s", exc)
+            module_statuses.append(f"• 📚 <b>ÜBYS:</b> ❌ Hata ({exc})")
             overall_ok = False
 
+    weather_obj: Optional[WeatherForecast] = _get_weather_safe(config) if config.enable_weather else None
     if config.enable_dining:
-        if run_dining_preview(config, notify_test=notify_test) != 0:
+        dining_rc = run_dining_preview(config, notify_test=notify_test, weather_override=weather_obj)
+        module_statuses.append("• 🍽️ <b>Yemekhane:</b> ✅ Gönderildi" if dining_rc == 0 else "• 🍽️ <b>Yemekhane:</b> ❌ Alınamadı")
+        if dining_rc != 0:
             overall_ok = False
 
-    if config.enable_weather and not config.enable_dining:
-        if run_weather_preview(config, notify_test=notify_test) != 0:
-            overall_ok = False
+    if config.enable_weather:
+        if weather_obj is not None:
+            loc_tag = f"{weather_obj.condition_icon} {weather_obj.condition_text}"
+            module_statuses.append(
+                f"• 🌦️ <b>Kampüs Hava Durumu:</b> ✅ {loc_tag}"
+                + (" (Menüye eklendi)" if config.enable_dining else "")
+            )
+            if not config.enable_dining:
+                _print_weather_report(weather_obj)
+                if notify_test:
+                    if not _send_telegram_safe(config, format_weather_report(weather_obj)):
+                        overall_ok = False
+        else:
+            module_statuses.append("• 🌦️ <b>Kampüs Hava Durumu:</b> ⚠️ Servislere şu an erişilemedi")
 
     if config.enable_calendar:
-        if run_calendar_preview(config, notify_test=notify_test) != 0:
+        cal_rc = run_calendar_preview(config, notify_test=notify_test)
+        module_statuses.append("• 📅 <b>Akademik Takvim:</b> ✅ Gönderildi" if cal_rc == 0 else "• 📅 <b>Akademik Takvim:</b> ❌ Alınamadı")
+        if cal_rc != 0:
             overall_ok = False
 
     if config.enable_announcements:
@@ -1673,9 +1723,22 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
         if config.announcement_keywords:
             anns = filter_new_announcements(anns, seen_ids=set(), keywords=config.announcement_keywords)
         _print_announcements(anns)
+        module_statuses.append(f"• 📢 <b>Duyurular:</b> ✅ {len(anns)} duyuru")
         if notify_test and anns:
             if not _send_telegram_safe(config, format_announcements(anns, is_preview=True)):
                 overall_ok = False
+
+    if notify_test and module_statuses:
+        summary_msg = "\n".join(
+            [
+                "🧩 <b>Swiss Tool Test Modül Özeti</b>",
+                "",
+                *module_statuses,
+                "",
+                "💬 <i>İpucu: Bota Telegram'dan /yardim yazarak komutları test edebilirsiniz.</i>",
+            ]
+        )
+        _send_telegram_safe(config, summary_msg)
 
     return 0 if overall_ok else 1
 

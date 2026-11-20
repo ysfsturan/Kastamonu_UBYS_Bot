@@ -1098,45 +1098,86 @@ def parse_transcript_url(home_html: str) -> Optional[str]:
     return None
 
 
+_AIS_ROUTE_RE = re.compile(
+    r"(/AIS/Student/[A-Za-z0-9_]+/[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)?)",
+    re.IGNORECASE,
+)
+_AIS_FULL_URL_RE = re.compile(
+    r"""(/AIS/Student/[A-Za-z0-9_]+/[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)?(?:\?[^"'\s<>)]*)?)""",
+    re.IGNORECASE,
+)
+
+_SCHEDULE_URL_KEYS = (
+    "weeklyschedule",
+    "courseschedule",
+    "lessonprogram",
+    "studentlessonprogram",
+    "timetable",
+    "schedule",
+    "dersprogram",
+)
+_SCHEDULE_TXT_KEYS = ("ders programı", "ders programi", "haftalık program", "haftalik program")
+_EXAM_URL_KEYS = (
+    "examschedule",
+    "examcalendar",
+    "studentexam",
+    "sinavprogram",
+    "sinavtakvim",
+    "exam/index",
+)
+_EXAM_TXT_KEYS = ("sınav takvim", "sinav takvim", "sınav program", "sinav program", "sınav tarih")
+
+
+def discover_home_routes(home_html: str) -> list[str]:
+    """Öğrenci ana sayfasındaki sorgu parametresiz /AIS/Student/... rota adlarını toplar (PII içermez)."""
+    routes: list[str] = []
+    seen: set[str] = set()
+    for match in _AIS_ROUTE_RE.finditer(home_html or ""):
+        route = match.group(1)
+        low = route.lower()
+        if low not in seen:
+            seen.add(low)
+            routes.append(route)
+    return routes
+
+
+def _iter_home_candidate_links(home_html: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(home_html or "", "html.parser")
+    pairs: list[tuple[str, str]] = []
+    for tag in soup.find_all(["a", "button", "li", "div", "span"]):
+        txt = _tr_lower(tag.get_text(" ", strip=True))
+        for attr in ("href", "data-url", "onclick"):
+            raw = str(tag.get(attr) or "").strip()
+            if not raw or raw == "#":
+                continue
+            if attr == "onclick" or raw.startswith("javascript:"):
+                m = _AIS_FULL_URL_RE.search(raw)
+                if m:
+                    pairs.append((m.group(1), txt))
+            else:
+                pairs.append((raw, txt))
+    for m in _AIS_FULL_URL_RE.finditer(home_html or ""):
+        pairs.append((m.group(1), ""))
+    return pairs
+
+
 def parse_schedule_url(home_html: str) -> Optional[str]:
     """Öğrenci ana sayfasından Haftalık Ders Programı bağlantısını bulur."""
-    soup = BeautifulSoup(home_html or "", "html.parser")
-    for link in soup.find_all("a", href=True):
-        href = str(link["href"]).strip()
-        if not href or href == "#" or href.startswith("javascript:"):
+    for raw_url, low_txt in _iter_home_candidate_links(home_html):
+        low_href = raw_url.lower()
+        if "exam" in low_href or "sınav" in low_txt or "sinav" in low_txt:
             continue
-        low_href = href.lower()
-        low_txt = _tr_lower(link.get_text(" ", strip=True))
-        if (
-            "weeklyschedule" in low_href
-            or "courseschedule" in low_href
-            or "schedule" in low_href
-            or "dersprogram" in low_href
-            or "ders programı" in low_txt
-            or "ders programi" in low_txt
-        ) and "exam" not in low_href and "sınav" not in low_txt:
-            return href
+        if any(k in low_href for k in _SCHEDULE_URL_KEYS) or any(k in low_txt for k in _SCHEDULE_TXT_KEYS):
+            return raw_url
     return None
 
 
 def parse_exam_schedule_url(home_html: str) -> Optional[str]:
     """Öğrenci ana sayfasından Sınav Programı / Takvimi bağlantısını bulur."""
-    soup = BeautifulSoup(home_html or "", "html.parser")
-    for link in soup.find_all("a", href=True):
-        href = str(link["href"]).strip()
-        if not href or href == "#" or href.startswith("javascript:"):
-            continue
-        low_href = href.lower()
-        low_txt = _tr_lower(link.get_text(" ", strip=True))
-        if (
-            "examschedule" in low_href
-            or "examcalendar" in low_href
-            or "sinavprogram" in low_href
-            or "sınav takvim" in low_txt
-            or "sınav program" in low_txt
-            or "sinav program" in low_txt
-        ):
-            return href
+    for raw_url, low_txt in _iter_home_candidate_links(home_html):
+        low_href = raw_url.lower()
+        if any(k in low_href for k in _EXAM_URL_KEYS) or any(k in low_txt for k in _EXAM_TXT_KEYS):
+            return raw_url
     return None
 
 

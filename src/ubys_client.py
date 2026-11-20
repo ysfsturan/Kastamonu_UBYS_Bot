@@ -23,6 +23,7 @@ from .ubys_parser import (
     ParseError,
     SessionExpiredError,
     UBYSError,
+    discover_home_routes,
     extract_ajax_csrf_token,
     extract_login_csrf_token,
     has_active_captcha,
@@ -97,6 +98,7 @@ class UBYSClient:
         self._schedule_url: Optional[str] = None
         self._exam_schedule_url: Optional[str] = None
         self._home_announcements: list[Announcement] = []
+        self._home_routes: list[str] = []
         self._program_hints: list[str] = []
 
     @property
@@ -113,6 +115,11 @@ class UBYSClient:
     def home_announcements(self) -> list[Announcement]:
         """Öğrenci ana sayfasından okunan ÜBYS duyurularını döndürür."""
         return list(self._home_announcements)
+
+    @property
+    def home_routes(self) -> list[str]:
+        """Öğrenci ana sayfasından keşfedilen statik AIS rotalarını döndürür."""
+        return list(self._home_routes)
 
     def __enter__(self) -> UBYSClient:
         return self
@@ -288,6 +295,7 @@ class UBYSClient:
         self._schedule_url = parse_schedule_url(home_resp.text)
         self._exam_schedule_url = parse_exam_schedule_url(home_resp.text)
         self._home_announcements = parse_ubys_home_announcements(home_resp.text, self.base_url)
+        self._home_routes = discover_home_routes(home_resp.text)
         self._program_hints = parse_student_program_hints(home_resp.text)
         return home_resp.text
 
@@ -497,6 +505,7 @@ class UBYSClient:
         sap_q = quote(self._sap_id, safe="") if self._sap_id else None
         for path in relative_paths:
             if sap_q:
+                candidates.append(f"{self.base_url}{path}?sapid={sap_q}")
                 candidates.append(f"{self.base_url}{path}?sapId={sap_q}")
             candidates.append(f"{self.base_url}{path}")
         seen: set[str] = set()
@@ -517,8 +526,11 @@ class UBYSClient:
         urls = self._build_candidate_urls(
             self._schedule_url,
             [
+                "/AIS/Student/LessonProgram/Index",
+                "/AIS/Student/StudentLessonProgram/Index",
                 "/AIS/Student/WeeklySchedule/Index",
                 "/AIS/Student/CourseSchedule/Index",
+                "/AIS/Student/Timetable/Index",
                 "/AIS/Student/Class/WeeklySchedule",
                 "/AIS/Student/DersProgrami/Index",
             ],
@@ -554,6 +566,8 @@ class UBYSClient:
             [
                 "/AIS/Student/ExamSchedule/Index",
                 "/AIS/Student/ExamCalendar/Index",
+                "/AIS/Student/StudentExam/Index",
+                "/AIS/Student/Exam/Index",
                 "/AIS/Student/Exam/ExamSchedule",
                 "/AIS/Student/Class/ExamSchedule",
             ],

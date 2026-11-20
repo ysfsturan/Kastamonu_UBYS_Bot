@@ -1,7 +1,9 @@
-"""Kastamonu Üniversitesi (Kuzeykent Kampüsü) ücretsiz Open-Meteo hava durumu modülü."""
+"""Kastamonu Üniversitesi (Kuzeykent Kampüsü) Open-Meteo & wttr.in yedekli hava durumu modülü."""
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import date
 from typing import Any, Optional
 
@@ -9,7 +11,61 @@ import httpx
 
 from .models import WeatherForecast
 
+logger = logging.getLogger(__name__)
+
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+WTTR_BASE_URL = "https://wttr.in"
+
+_WWO_TO_WMO: dict[int, int] = {
+    113: 0,
+    116: 2,
+    119: 3,
+    122: 3,
+    143: 45,
+    176: 80,
+    179: 85,
+    182: 66,
+    185: 56,
+    200: 95,
+    227: 71,
+    230: 75,
+    248: 48,
+    260: 48,
+    263: 51,
+    266: 51,
+    281: 56,
+    284: 57,
+    293: 61,
+    296: 61,
+    299: 63,
+    302: 63,
+    305: 65,
+    308: 65,
+    311: 66,
+    314: 67,
+    317: 66,
+    320: 71,
+    323: 71,
+    326: 71,
+    329: 73,
+    332: 73,
+    335: 75,
+    338: 75,
+    350: 77,
+    353: 80,
+    356: 81,
+    359: 82,
+    362: 66,
+    365: 67,
+    368: 85,
+    371: 86,
+    374: 77,
+    377: 77,
+    386: 95,
+    389: 95,
+    392: 96,
+    395: 99,
+}
 
 WMO_CODE_MAP: dict[int, tuple[str, str]] = {
     0: ("Açık / Güneşli", "☀️"),
@@ -201,13 +257,115 @@ def parse_open_meteo_response(
     )
 
 
+def _build_ipv4_transport() -> Optional[httpx.HTTPTransport]:
+    try:
+        return httpx.HTTPTransport(local_address="0.0.0.0")
+    except OSError:
+        return None
+
+
+def _wwo_to_wmo(wwo_code: Optional[int]) -> int:
+    if wwo_code is None:
+        return 0
+    return _WWO_TO_WMO.get(wwo_code, 2)
+
+
+def parse_wttr_response(
+    data: dict[str, Any],
+    location_name: str = "Kastamonu (Kuzeykent)",
+) -> WeatherForecast:
+    """wttr.in ?format=j1 JSON yanıtını WeatherForecast nesnesine dönüştürür."""
+    if not isinstance(data, dict):
+        raise WeatherError("wttr.in hava durumu yanıtı beklenen JSON formatında değil.")
+
+    curr_list = data.get("current_condition") or []
+    curr = curr_list[0] if curr_list and isinstance(curr_list[0], dict) else {}
+    daily_list = data.get("weather") or []
+
+    forecast_date = date.today()
+    if daily_list and isinstance(daily_list[0], dict) and daily_list[0].get("date"):
+        try:
+            forecast_date = date.fromisoformat(str(daily_list[0]["date"])[:10])
+        except ValueError:
+            pass
+
+    curr_wwo = _opt_int(curr.get("weatherCode"))
+    weather_code = _wwo_to_wmo(curr_wwo)
+    cond_text, cond_icon = describe_wmo_code(weather_code)
+    current_temp = _opt_float(curr.get("temp_C"))
+    apparent_temp = _opt_float(curr.get("FeelsLikeC"))
+    wind_speed = _opt_float(curr.get("windspeedKmph"))
+
+    daily_summaries: list[str] = []
+    today_min: Optional[float] = None
+    today_max: Optional[float] = None
+    today_precip: Optional[int] = None
+
+    for idx, day_obj in enumerate(daily_list[:3]):
+        if not isinstance(day_obj, dict):
+            continue
+        raw_d = str(day_obj.get("date") or "")
+        try:
+            d_label = date.fromisoformat(raw_d[:10]).strftime("%d.%m")
+        except ValueError:
+            d_label = raw_d or "-"
+
+        d_min = _opt_float(day_obj.get("mintempC"))
+        d_max = _opt_float(day_obj.get("maxtempC"))
+        hourly = day_obj.get("hourly") or []
+        rain_chances = [
+            ch for ch in (_opt_int(h.get("chanceofrain")) for h in hourly if isinstance(h, dict))
+            if ch is not None
+        ]
+        d_prec = max(rain_chances) if rain_chances else None
+
+        mid_slot = hourly[len(hourly) // 2] if hourly and isinstance(hourly[len(hourly) // 2], dict) else {}
+        d_wmo = _wwo_to_wmo(_opt_int(mid_slot.get("weatherCode")) if mid_slot else curr_wwo)
+        d_txt, d_ico = describe_wmo_code(d_wmo)
+
+        if idx == 0:
+            today_min = d_min
+            today_max = d_max
+            today_precip = d_prec
+
+        temp_part = f"{d_min:.0f}°/{d_max:.0f}°C" if (d_min is not None and d_max is not None) else "-"
+        prec_part = f" (Yağış %{d_prec})" if d_prec is not None else ""
+        daily_summaries.append(f"{d_label}: {d_ico} {d_txt}, {temp_part}{prec_part}")
+
+    tomorrow_summary = daily_summaries[1] if len(daily_summaries) >= 2 else None
+    advice = build_weather_advice(
+        temp_min=today_min if today_min is not None else current_temp,
+        temp_max=today_max if today_max is not None else current_temp,
+        precip_prob=today_precip,
+        wind_speed=wind_speed,
+        weather_code=weather_code,
+    )
+
+    return WeatherForecast(
+        location_name=location_name,
+        forecast_date=forecast_date,
+        current_temp=current_temp,
+        apparent_temp=apparent_temp,
+        temp_min=today_min,
+        temp_max=today_max,
+        precip_probability=today_precip,
+        wind_speed=wind_speed,
+        weather_code=weather_code,
+        condition_text=cond_text,
+        condition_icon=cond_icon,
+        advice=advice,
+        tomorrow_summary=tomorrow_summary,
+        daily_summaries=daily_summaries,
+    )
+
+
 def fetch_weather_forecast(
     lat: float = 41.4307,
     lon: float = 33.7764,
     location_name: str = "Kastamonu (Kuzeykent)",
     timeout: float = 15.0,
 ) -> WeatherForecast:
-    """Open-Meteo API üzerinden güncel ve 3 günlük Kastamonu hava tahminini çeker."""
+    """Open-Meteo (ve hata halinde wttr.in) üzerinden Kastamonu hava tahminini çeker."""
     params = {
         "latitude": f"{lat:.4f}",
         "longitude": f"{lon:.4f}",
@@ -216,13 +374,39 @@ def fetch_weather_forecast(
         "timezone": "Europe/Istanbul",
         "forecast_days": 3,
     }
-    try:
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            resp = client.get(OPEN_METEO_URL, params=params)
-            if resp.status_code >= 400:
-                raise WeatherError(f"Hava durumu API hatası: HTTP {resp.status_code}")
-            return parse_open_meteo_response(resp.json(), location_name=location_name)
-    except WeatherError:
-        raise
-    except (httpx.HTTPError, ValueError) as exc:
-        raise WeatherError(f"Hava durumu alınamadı: {exc}") from exc
+    client_kwargs: dict[str, Any] = {
+        "timeout": httpx.Timeout(timeout, connect=min(10.0, timeout)),
+        "follow_redirects": True,
+    }
+    transport = _build_ipv4_transport()
+    if transport is not None:
+        client_kwargs["transport"] = transport
+
+    open_meteo_err: Optional[Exception] = None
+    with httpx.Client(**client_kwargs) as client:
+        for attempt in range(2):
+            try:
+                resp = client.get(OPEN_METEO_URL, params=params)
+                if resp.status_code == 200:
+                    return parse_open_meteo_response(resp.json(), location_name=location_name)
+                open_meteo_err = WeatherError(f"Open-Meteo HTTP {resp.status_code}")
+                if resp.status_code not in {429, 500, 502, 503, 504}:
+                    break
+            except (httpx.HTTPError, ValueError, WeatherError) as exc:
+                open_meteo_err = exc
+            if attempt == 0:
+                time.sleep(1.0)
+
+        logger.warning("Open-Meteo alınamadı (%s); wttr.in yedek kaynağı deneniyor...", open_meteo_err)
+        try:
+            wttr_url = f"{WTTR_BASE_URL}/{lat:.4f},{lon:.4f}"
+            resp_wttr = client.get(wttr_url, params={"format": "j1"})
+            if resp_wttr.status_code == 200:
+                return parse_wttr_response(resp_wttr.json(), location_name=location_name)
+            raise WeatherError(f"wttr.in HTTP {resp_wttr.status_code}")
+        except WeatherError:
+            raise
+        except (httpx.HTTPError, ValueError) as wttr_exc:
+            raise WeatherError(
+                f"Hava durumu alınamadı (Open-Meteo: {open_meteo_err}; wttr.in: {wttr_exc})"
+            ) from wttr_exc

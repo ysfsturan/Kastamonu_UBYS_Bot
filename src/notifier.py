@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import time
 from collections import OrderedDict
 from datetime import date
@@ -33,11 +34,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MAX_LENGTH = 4000
 
 
-def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
-    """Uzun mesajları satır sınırlarından Telegram limitine uygun parçalara böler."""
-    if len(text) <= max_length:
-        return [text]
-
+def _split_lines_fallback(text: str, max_length: int) -> list[str]:
     chunks: list[str] = []
     current_lines: list[str] = []
     current_len = 0
@@ -63,6 +60,41 @@ def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]
 
     if current_lines:
         chunks.append("\n".join(current_lines))
+    return chunks
+
+
+def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
+    """Uzun mesajları önce blok (\n\n), gerekirse satır sınırlarından Telegram limitine uygun parçalara böler."""
+    if len(text) <= max_length:
+        return [text]
+
+    if "\n\n" not in text:
+        return _split_lines_fallback(text, max_length)
+
+    chunks: list[str] = []
+    current_blocks: list[str] = []
+    current_len = 0
+
+    for block in text.split("\n\n"):
+        if len(block) > max_length:
+            if current_blocks:
+                chunks.append("\n\n".join(current_blocks))
+                current_blocks = []
+                current_len = 0
+            chunks.extend(_split_lines_fallback(block, max_length))
+            continue
+
+        added_len = len(block) if not current_blocks else len(block) + 2
+        if current_len + added_len > max_length and current_blocks:
+            chunks.append("\n\n".join(current_blocks))
+            current_blocks = [block]
+            current_len = len(block)
+        else:
+            current_blocks.append(block)
+            current_len += added_len
+
+    if current_blocks:
+        chunks.append("\n\n".join(current_blocks))
 
     return chunks
 
@@ -362,13 +394,17 @@ def _format_course_summary_lines(courses: list[CourseGrade], max_courses: int = 
             extras.append(", ".join(scored_exams))
         if course.letter_grade:
             extras.append(f"Harf: {course.letter_grade}")
-        mw, fw, weight_src = resolve_course_weights(course)
-        if weight_src != "default":
-            extras.append(f"Vize/Final: %{round(mw * 100)}/%{round(fw * 100)}")
-        if course.status:
-            extras.append(course.status)
+        if not scored_exams and not course.letter_grade:
+            extras.append("Henüz not yok")
 
-        summary = " | ".join(extras) if extras else "Henüz açıklanmış not yok"
+        mw, fw, _ = resolve_course_weights(course)
+        extras.append(f"Vize/Final: %{round(mw * 100)}/%{round(fw * 100)}")
+
+        durum = course.status or course.attendance_status
+        if durum:
+            extras.append(durum)
+
+        summary = " | ".join(extras)
         lines.append(f"• <b>{html.escape(title)}</b>\n  {html.escape(summary)}")
 
     if len(courses) > max_courses:
@@ -636,20 +672,34 @@ def format_transcript_summary(summary: TranscriptSummary, base_url: str) -> str:
         lines.append("")
         lines.append("📅 <b>Dönem Ortalamaları:</b>")
         for sem in summary.semesters:
+            clean_name = re.sub(r"\s+\.", ".", sem.name).strip()
+            sem_has_grades = any(bool(c.letter_grade) for c in sem.courses) or (
+                sem.semester_gpa is not None and sem.semester_gpa > 0.0
+            )
             parts: list[str] = []
-            if sem.semester_gpa is not None:
-                parts.append(f"YANO: {sem.semester_gpa:.2f}")
-            if sem.cumulative_gpa is not None:
-                parts.append(f"GANO: {sem.cumulative_gpa:.2f}")
+            if not sem_has_grades and (sem.semester_gpa is None or sem.semester_gpa == 0.0):
+                parts.append("Henüz not girilmedi")
+            else:
+                if sem.semester_gpa is not None:
+                    parts.append(f"YANO: {sem.semester_gpa:.2f}")
+                if sem.cumulative_gpa is not None:
+                    parts.append(f"GANO: {sem.cumulative_gpa:.2f}")
             if not parts and sem.courses:
                 parts.append(f"{len(sem.courses)} ders")
             suffix = f" ({' | '.join(parts)})" if parts else ""
-            lines.append(f"• <b>{html.escape(sem.name)}</b>{html.escape(suffix)}")
+            lines.append(f"• <b>{html.escape(clean_name)}</b>{html.escape(suffix)}")
 
-        latest = summary.semesters[-1]
+        graded_sems = [s for s in summary.semesters if any(bool(c.letter_grade) for c in s.courses)]
+        latest = graded_sems[-1] if graded_sems else summary.semesters[-1]
+        latest_name = re.sub(r"\s+\.", ".", latest.name).strip()
+        latest_heading = (
+            f"📚 <b>Son Notlu Dönem ({html.escape(latest_name)}):</b>"
+            if graded_sems
+            else f"📚 <b>Son Dönem ({html.escape(latest_name)}):</b>"
+        )
         if latest.courses:
             lines.append("")
-            lines.append(f"📚 <b>Son Dönem ({html.escape(latest.name)}):</b>")
+            lines.append(latest_heading)
             for c in latest.courses[:20]:
                 grade_str = html.escape(c.letter_grade or "-")
                 title = f"{c.code} - {c.name}" if c.code else c.name
@@ -887,6 +937,40 @@ def format_weather_report(weather: WeatherForecast) -> str:
     return "\n".join(lines)
 
 
+def _trim_announcement_summary(raw: str, limit: int = 110) -> str:
+    cleaned = " ".join((raw or "").split())
+    cleaned = re.sub(r"\s+([’'])", r"\1", cleaned)
+    cleaned = re.sub(r"([A-Za-zÇĞİÖŞÜçğıöşü0-9][’'])\s+(?=[a-zçğıöşü])", r"\1", cleaned)
+    if len(re.sub(r"[^0-9A-Za-zÇĞİÖŞÜçğıöşü]+", "", cleaned)) < 4:
+        return ""
+    if len(cleaned) <= limit:
+        return cleaned
+    clipped = cleaned[:limit].rsplit(" ", 1)[0].rstrip(".,;: ")
+    return f"{clipped}..."
+
+
+def _select_balanced_announcements(items: list[Announcement], max_items: int = 8) -> list[Announcement]:
+    if len(items) <= max_items:
+        return items
+    buckets: OrderedDict[str, list[Announcement]] = OrderedDict()
+    for item in items:
+        buckets.setdefault(item.source, []).append(item)
+    selected: list[Announcement] = []
+    idx = 0
+    while len(selected) < max_items:
+        added_any = False
+        for src_list in buckets.values():
+            if idx < len(src_list):
+                selected.append(src_list[idx])
+                added_any = True
+                if len(selected) >= max_items:
+                    break
+        if not added_any:
+            break
+        idx += 1
+    return selected
+
+
 def format_announcements(announcements: list[Announcement], is_preview: bool = False) -> str:
     """Üniversite / OİDB / SKS / Fakülte / ÜBYS duyurularını Telegram HTML mesajına çevirir."""
     header = "📢 <b>Kastamonu Üniversitesi Güncel Duyurular</b>" if is_preview else "📢 <b>Yeni Duyuru Bildirimi</b>"
@@ -895,13 +979,18 @@ def format_announcements(announcements: list[Announcement], is_preview: bool = F
         lines.append("Gösterilecek duyuru bulunamadı.")
         return "\n".join(lines)
 
-    for item in announcements[:15]:
+    to_show = _select_balanced_announcements(announcements, max_items=8) if is_preview else announcements[:15]
+    for item in to_show:
         date_tag = f" ({html.escape(item.published_date)})" if item.published_date else ""
         lines.append(f"🏷️ <b>[{html.escape(item.source)}]</b>{date_tag}")
         lines.append(f'• <a href="{html.escape(item.url, quote=True)}">{html.escape(item.title)}</a>')
-        if item.summary:
-            lines.append(f"  <i>{html.escape(item.summary)}</i>")
+        trimmed_sum = _trim_announcement_summary(item.summary)
+        if trimmed_sum:
+            lines.append(f"  <i>{html.escape(trimmed_sum)}</i>")
         lines.append("")
+
+    if is_preview and len(announcements) > len(to_show):
+        lines.append(f"<i>... toplam {len(announcements)} duyurunun en güncel {len(to_show)} tanesi gösterildi.</i>")
     return "\n".join(lines).rstrip()
 
 

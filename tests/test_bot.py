@@ -107,6 +107,7 @@ from src.notifier import (
     format_grade_changes,
     format_help_message,
     format_material_alerts,
+    format_test_summary,
     format_transcript_summary,
     format_weather_report,
     format_weekly_briefing,
@@ -123,6 +124,7 @@ from src.schedule import (
 from src.ubys_client import LoginError, NetworkError
 from src.ubys_parser import (
     SessionExpiredError,
+    discover_home_routes,
     extract_ajax_csrf_token,
     extract_login_csrf_token,
     has_active_captcha,
@@ -144,7 +146,9 @@ from src.weather import (
     WeatherError,
     build_weather_advice,
     describe_wmo_code,
+    fetch_weather_forecast,
     parse_open_meteo_response,
+    parse_wttr_response,
 )
 
 SAMPLE_LOGIN_HTML = """
@@ -1969,6 +1973,128 @@ class TelegramCommandsAndBriefingTests(unittest.TestCase):
         )
         self.assertIn("Haftalık Kastamonu ÜBYS Öğrenci Özeti", briefing_msg)
         self.assertIn("BPBZ201", briefing_msg)
+
+
+class PolishAndReliabilityTests(unittest.TestCase):
+    def test_weather_wttr_fallback_and_parse(self) -> None:
+        wttr_sample = {
+            "current_condition": [{"temp_C": "16", "FeelsLikeC": "15", "weatherCode": "116", "windspeedKmph": "12"}],
+            "weather": [
+                {"date": "2026-11-20", "mintempC": "5", "maxtempC": "18", "hourly": [{"chanceofrain": "10", "weatherCode": "116"}, {"chanceofrain": "68", "weatherCode": "353"}]},
+                {"date": "2026-11-21", "mintempC": "7", "maxtempC": "14", "hourly": [{"chanceofrain": "80", "weatherCode": "302"}]},
+                {"date": "2026-11-22", "mintempC": "0", "maxtempC": "11", "hourly": [{"chanceofrain": "5", "weatherCode": "248"}]},
+            ],
+        }
+        wf = parse_wttr_response(wttr_sample, "Kastamonu (Kuzeykent)")
+        self.assertEqual(wf.current_temp, 16.0)
+        self.assertEqual(wf.precip_probability, 68)
+        self.assertEqual(len(wf.daily_summaries), 3)
+
+        resp_om_err = MagicMock(status_code=503)
+        resp_wttr_ok = MagicMock(status_code=200)
+        resp_wttr_ok.json.return_value = wttr_sample
+        with (
+            patch("src.weather.time.sleep"),
+            patch("src.weather.httpx.Client") as mock_cli,
+        ):
+            cli_inst = mock_cli.return_value.__enter__.return_value
+            cli_inst.get.side_effect = [resp_om_err, resp_om_err, resp_wttr_ok]
+            fallback_wf = fetch_weather_forecast()
+        self.assertEqual(fallback_wf.current_temp, 16.0)
+        self.assertIn("şemsiye", fallback_wf.advice)
+
+    def test_announcements_dots_apostrophe_balance_and_paragraph_split(self) -> None:
+        html_ann = """
+        <a class="sppb-articles-scroller-link" href="/duyuru/1">
+          <span class="sppb-articles-scroller-day">13</span>
+          <span class="sppb-articles-scroller-month">Kas</span>
+          <div class="sppb-addon-articles-scroller-title">ÖZYES Ek Yerleştirme Sonuçları</div>
+          <div class="sppb-articles-scroller-introtext">...</div>
+        </a>
+        <a class="sppb-articles-scroller-link" href="/duyuru/2">
+          <span class="sppb-articles-scroller-day">16</span>
+          <span class="sppb-articles-scroller-month">Kas</span>
+          <div class="sppb-addon-articles-scroller-title">Havuz Tadilatı Hakkında</div>
+          <div class="sppb-articles-scroller-introtext">Merkezi' nde bakım çalışması vardır.</div>
+        </a>
+        """
+        parsed = parse_announcements_html(html_ann, "OİDB", "https://oidb.kastamonu.edu.tr/")
+        self.assertEqual(parsed[0].summary, "")
+        self.assertEqual(parsed[1].summary, "Merkezi'nde bakım çalışması vardır.")
+
+        mixed = [
+            Announcement(announcement_id=f"o{i}", source="OİDB", title=f"OİDB Duyuru {i}", url=f"https://o/{i}")
+            for i in range(10)
+        ] + [
+            Announcement(announcement_id=f"s{i}", source="SKS", title=f"SKS Duyuru {i}", url=f"https://s/{i}")
+            for i in range(4)
+        ]
+        preview = format_announcements(mixed, is_preview=True)
+        self.assertIn("[OİDB]", preview)
+        self.assertIn("[SKS]", preview)
+        self.assertIn("en güncel 8 tanesi", preview)
+
+        # Blok bazlı bölme başlığı ve bağlantıyı ayırmamalı
+        blocks = [f"🏷️ <b>[SRC]</b>\n• <a href=\"https://x/{i}\">Duyuru Başlığı {i}</a>" for i in range(15)]
+        msg = "\n\n".join(blocks)
+        chunks = split_message(msg, max_length=300)
+        self.assertGreater(len(chunks), 2)
+        for ch in chunks:
+            for part in ch.split("\n\n"):
+                if "🏷️" in part:
+                    self.assertIn("• <a href=", part)
+
+    def test_transcript_clean_semesters_course_summary_and_home_routes(self) -> None:
+        tr = TranscriptSummary(
+            gano=2.86,
+            semesters=[
+                TranscriptSemester(
+                    name="2 . Yarıyıl",
+                    semester_gpa=2.82,
+                    courses=[TranscriptCourse(code="BPZ102", name="Algoritmalar", letter_grade="BB")],
+                ),
+                TranscriptSemester(
+                    name="3 . Yarıyıl",
+                    semester_gpa=0.00,
+                    courses=[TranscriptCourse(code="BPZ201", name="İnternet Prog.", letter_grade=None)],
+                ),
+                TranscriptSemester(
+                    name="4 . Yarıyıl",
+                    semester_gpa=0.00,
+                    courses=[TranscriptCourse(code="BPZ202", name="Sistem Analizi", letter_grade=None)],
+                ),
+            ],
+        )
+        t_msg = format_transcript_summary(tr, "https://ubys.kastamonu.edu.tr")
+        self.assertIn("2. Yarıyıl", t_msg)
+        self.assertIn("Henüz not girilmedi", t_msg)
+        self.assertNotIn("YANO: 0.00", t_msg)
+        self.assertIn("Son Notlu Dönem (2. Yarıyıl)", t_msg)
+        self.assertIn("BPZ102 - Algoritmalar", t_msg)
+
+        c_msg = format_test_summary(
+            [
+                CourseGrade(
+                    semester="2026 - Güz",
+                    code="BPBS213",
+                    name="Nesne Tabanlı Programlama-I",
+                    attendance_status="Devamlı",
+                )
+            ]
+        )
+        self.assertIn("Henüz not yok", c_msg)
+        self.assertIn("Vize/Final: %40/%60", c_msg)
+        self.assertIn("Devamlı", c_msg)
+
+        home_js_html = """
+        <button onclick="openMenu('/AIS/Student/LessonProgram/Index?sapid=SECRET123')">Ders Programı</button>
+        <div data-url="/AIS/Student/StudentExam/Index?sapid=SECRET123">Sınav Takvimi</div>
+        """
+        routes = discover_home_routes(home_js_html)
+        self.assertEqual(routes, ["/AIS/Student/LessonProgram/Index", "/AIS/Student/StudentExam/Index"])
+        self.assertTrue(all("SECRET" not in r for r in routes))
+        self.assertEqual(parse_schedule_url(home_js_html), "/AIS/Student/LessonProgram/Index?sapid=SECRET123")
+        self.assertEqual(parse_exam_schedule_url(home_js_html), "/AIS/Student/StudentExam/Index?sapid=SECRET123")
 
 
 if __name__ == "__main__":
