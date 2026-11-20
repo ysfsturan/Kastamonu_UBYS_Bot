@@ -1237,6 +1237,87 @@ def _opt_float_tr(val: Any) -> Optional[float]:
         return None
 
 
+def _extract_transcript_courses_from_raw(c_raw: dict[str, Any]) -> list[TranscriptCourse]:
+    """Transkript JSON ders nesnesinden seçmeli alt dersleri varsa onları, yoksa ana dersi çıkarır."""
+    parent_grade = normalize_letter_grade(str(c_raw.get("Grade") or c_raw.get("LetterGrade") or ""))
+    parent_credit = _opt_float_tr(c_raw.get("Credit"))
+    parent_ects = _opt_float_tr(c_raw.get("Ects") or c_raw.get("AKTS"))
+
+    nested_keys = (
+        "TakenCourses",
+        "ElectiveCourses",
+        "SubCourses",
+        "ChildCourses",
+        "SelectedCourses",
+        "GroupCourses",
+        "ReplacedCourses",
+        "Courses",
+    )
+    for key in nested_keys:
+        nested = c_raw.get(key)
+        if not isinstance(nested, list) or not nested:
+            continue
+        sub_courses: list[TranscriptCourse] = []
+        for sub in nested:
+            if not isinstance(sub, dict):
+                continue
+            s_code = _clean_text(str(sub.get("CourseCode") or sub.get("Code") or ""))
+            s_name = _clean_text(str(sub.get("CourseName") or sub.get("Name") or ""))
+            if not (s_code or s_name):
+                continue
+            s_grade = normalize_letter_grade(str(sub.get("Grade") or sub.get("LetterGrade") or "")) or parent_grade
+            s_credit = _opt_float_tr(sub.get("Credit"))
+            if s_credit is None:
+                s_credit = parent_credit
+            s_ects = _opt_float_tr(sub.get("Ects") or sub.get("AKTS"))
+            if s_ects is None:
+                s_ects = parent_ects
+            sub_courses.append(
+                TranscriptCourse(
+                    code=s_code,
+                    name=s_name,
+                    credit=s_credit,
+                    ects=s_ects,
+                    letter_grade=s_grade,
+                )
+            )
+        if sub_courses:
+            return sub_courses
+
+    for code_key, name_key in (
+        ("TakenCourseCode", "TakenCourseName"),
+        ("SelectedCourseCode", "SelectedCourseName"),
+        ("ReplacedCourseCode", "ReplacedCourseName"),
+        ("ActualCourseCode", "ActualCourseName"),
+    ):
+        alt_code = _clean_text(str(c_raw.get(code_key) or ""))
+        alt_name = _clean_text(str(c_raw.get(name_key) or ""))
+        if alt_code or alt_name:
+            return [
+                TranscriptCourse(
+                    code=alt_code,
+                    name=alt_name,
+                    credit=parent_credit,
+                    ects=parent_ects,
+                    letter_grade=parent_grade,
+                )
+            ]
+
+    code = _clean_text(str(c_raw.get("CourseCode") or ""))
+    name = _clean_text(str(c_raw.get("CourseName") or ""))
+    if not (code or name):
+        return []
+    return [
+        TranscriptCourse(
+            code=code,
+            name=name,
+            credit=parent_credit,
+            ects=parent_ects,
+            letter_grade=parent_grade,
+        )
+    ]
+
+
 def parse_transcript(html: str) -> TranscriptSummary:
     """ÜBYS transkript sayfasından (_jsm Base64 JSON veya HTML tablo fallback) özet çıkarır."""
     if is_login_page(html):
@@ -1274,21 +1355,7 @@ def parse_transcript(html: str) -> TranscriptSummary:
                     for c_raw in sem_raw.get("Courses") or []:
                         if not isinstance(c_raw, dict):
                             continue
-                        code = _clean_text(str(c_raw.get("CourseCode") or ""))
-                        name = _clean_text(str(c_raw.get("CourseName") or ""))
-                        if not (code or name):
-                            continue
-                        courses.append(
-                            TranscriptCourse(
-                                code=code,
-                                name=name,
-                                credit=_opt_float_tr(c_raw.get("Credit")),
-                                ects=_opt_float_tr(c_raw.get("Ects") or c_raw.get("AKTS")),
-                                letter_grade=normalize_letter_grade(
-                                    str(c_raw.get("Grade") or c_raw.get("LetterGrade") or "")
-                                ),
-                            )
-                        )
+                        courses.extend(_extract_transcript_courses_from_raw(c_raw))
                     if sem_name or courses:
                         semesters.append(
                             TranscriptSemester(

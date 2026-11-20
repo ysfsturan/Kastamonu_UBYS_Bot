@@ -95,6 +95,7 @@ from .notifier import (
     format_weather_report,
     format_weekly_briefing,
     format_weekly_schedule,
+    resolve_transcript_semester_courses,
     select_transcript_semesters,
 )
 from .schedule import (
@@ -273,8 +274,16 @@ def _print_transcript_summary(
     _, _, active_idx = select_transcript_semesters(summary, active_courses=active_courses)
     for idx, sem in enumerate(summary.semesters):
         tag = ""
-        if idx == active_idx and not any(bool(c.letter_grade) for c in sem.courses):
-            tag = " [Aktif Dönem]"
+        sem_courses = sem.courses
+        if idx == active_idx:
+            other_sems = [s for s in summary.semesters if s is not sem]
+            sem_courses = resolve_transcript_semester_courses(
+                sem,
+                active_courses=active_courses,
+                other_semesters=other_sems,
+            )
+            if any(not c.letter_grade for c in sem_courses) or (sem.semester_gpa or 0.0) == 0.0:
+                tag = " [Aktif Dönem]"
         elif active_idx >= 0 and idx > active_idx and not any(bool(c.letter_grade) for c in sem.courses):
             tag = " [Gelecek Dönem]"
         gpa_str = f" | YANO: {sem.semester_gpa:.2f}" if sem.semester_gpa is not None and sem.semester_gpa > 0 else ""
@@ -282,7 +291,7 @@ def _print_transcript_summary(
         print(f"\n• {sem.name}{tag}{gpa_str}{cum_str}")
         if active_idx >= 0 and idx > active_idx and not any(bool(c.letter_grade) for c in sem.courses):
             continue
-        for c in sem.courses:
+        for c in sem_courses:
             print(f"  - {c.code} {c.name}: {c.letter_grade or '-'}")
 
 

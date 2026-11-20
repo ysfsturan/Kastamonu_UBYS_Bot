@@ -6,7 +6,7 @@ import html
 import logging
 import re
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from datetime import date
 from typing import Any, Iterable, Optional
 
@@ -25,6 +25,7 @@ from .models import (
     GradeChange,
     GradeTargetAnalysis,
     ScheduleSlot,
+    TranscriptCourse,
     TranscriptSemester,
     TranscriptSummary,
     WeatherForecast,
@@ -659,10 +660,181 @@ def format_grade_calculator(analysis: GradeTargetAnalysis) -> str:
     return "\n".join(lines)
 
 
+_GPA_LETTER_GRADES = frozenset({"AA", "BA", "BB", "CB", "CC", "DC", "DD", "FD", "FF"})
+
+_TR_FOLD_MAP = str.maketrans(
+    {
+        "İ": "i",
+        "I": "i",
+        "ı": "i",
+        "Ç": "c",
+        "ç": "c",
+        "Ğ": "g",
+        "ğ": "g",
+        "Ö": "o",
+        "ö": "o",
+        "Ş": "s",
+        "ş": "s",
+        "Ü": "u",
+        "ü": "u",
+    }
+)
+
+
+def _fold_tr_notifier(text: Optional[str]) -> str:
+    return " ".join(str(text or "").translate(_TR_FOLD_MAP).lower().split())
+
+
 def _norm_tr_code(code: Optional[str]) -> str:
     if not code:
         return ""
     return re.sub(r"[\s\-_]+", "", re.sub(r"\.\d+$", "", str(code).strip())).upper()
+
+
+def _semester_has_gpa_grades(sem: TranscriptSemester) -> bool:
+    """Dönemde GPA ortalamasına giren gerçek harf notu veya >0 YANO olup olmadığını kontrol eder."""
+    if sem.semester_gpa is not None and sem.semester_gpa > 0.0:
+        return True
+    return any((c.letter_grade or "").strip().upper() in _GPA_LETTER_GRADES for c in sem.courses)
+
+
+def _is_elective_placeholder(course: TranscriptCourse) -> bool:
+    """Transkript satırının henüz atanmamış bir seçmeli ders yer tutucusu olup olmadığını kontrol eder."""
+    if course.letter_grade:
+        return False
+    folded_name = _fold_tr_notifier(course.name)
+    folded_code = _fold_tr_notifier(course.code)
+
+    if folded_name and ("secmeli" in folded_name or "elective" in folded_name):
+        name_pattern = (
+            r"^(?:(?:mesleki|alan|bolum|fakulte|universite|teknik|sosyal|genel|serbest|ortak|"
+            r"program|disiplinlerarasi|yabanci|dil|ici|disi|kultur|secmeli|technical|general|"
+            r"department|faculty|university|free|social|area)\s+)*"
+            r"(?:secmeli|elective)(?:\s+(?:ders(?:i|ler(?:i)?)?|course))?"
+            r"(?:\s*[-–/:]*\s*(?:[ivx]+|\d+))?$"
+        )
+        if re.match(name_pattern, folded_name):
+            return True
+
+    if folded_code and re.match(
+        r"^(?:[A-Z]{1,3}S|[A-Z]{1,3}SD|S|SEC|ELC)[\-_](?:[IVX]+|[1-9])$",
+        folded_code.upper(),
+    ):
+        if not folded_name or "secmeli" in folded_name or "elective" in folded_name:
+            return True
+    return False
+
+
+def _infer_dept_prefix(courses: Iterable[TranscriptCourse]) -> Optional[str]:
+    votes: Counter[str] = Counter()
+    for c in courses:
+        if _is_elective_placeholder(c):
+            continue
+        norm = _norm_tr_code(c.code)
+        m = re.match(r"^([A-Z]{3,5})\d{3}", norm)
+        if m:
+            votes[m.group(1)[:3]] += 1
+    if not votes:
+        return None
+    return votes.most_common(1)[0][0]
+
+
+def resolve_transcript_semester_courses(
+    sem: TranscriptSemester,
+    active_courses: Optional[list[CourseGrade]] = None,
+    other_semesters: Optional[list[TranscriptSemester]] = None,
+) -> list[TranscriptCourse]:
+    """Aktif dönemdeki seçmeli yer tutucularını (MS-III, S-III vb.) alınan gerçek derslerle eşleştirir."""
+    if not active_courses:
+        return list(sem.courses)
+
+    sem_mandatory_codes = {
+        _norm_tr_code(c.code)
+        for c in sem.courses
+        if not _is_elective_placeholder(c) and _norm_tr_code(c.code)
+    }
+    other_mandatory_codes = {
+        _norm_tr_code(c.code)
+        for other in (other_semesters or [])
+        for c in other.courses
+        if not _is_elective_placeholder(c) and _norm_tr_code(c.code)
+    }
+    known_non_elective_codes = sem_mandatory_codes | other_mandatory_codes
+
+    active_by_code: dict[str, CourseGrade] = {}
+    elective_candidates: list[CourseGrade] = []
+    for ac in active_courses:
+        code_norm = _norm_tr_code(ac.code)
+        if code_norm:
+            active_by_code[code_norm] = ac
+        if not code_norm or code_norm not in known_non_elective_codes:
+            elective_candidates.append(ac)
+
+    dept_prefix = _infer_dept_prefix(sem.courses)
+    resolved: list[TranscriptCourse] = []
+
+    for c in sem.courses:
+        if not _is_elective_placeholder(c):
+            c_norm = _norm_tr_code(c.code)
+            matched_active = active_by_code.get(c_norm)
+            if c.letter_grade is None and matched_active is not None and matched_active.letter_grade:
+                resolved.append(
+                    TranscriptCourse(
+                        code=c.code,
+                        name=c.name,
+                        credit=c.credit,
+                        ects=c.ects,
+                        letter_grade=matched_active.letter_grade,
+                    )
+                )
+            else:
+                resolved.append(c)
+            continue
+
+        if not elective_candidates:
+            resolved.append(c)
+            continue
+
+        slot_hint = _fold_tr_notifier(f"{c.code} {c.name}")
+        is_field_slot = any(kw in slot_hint for kw in ("mesleki", "alan", "bolum", "teknik")) or bool(
+            re.match(r"^(?:MS|MSD|AS|ASD|BS|BSD|TS|TSD)\b", (c.code or "").strip().upper())
+        )
+        is_univ_slot = any(kw in slot_hint for kw in ("universite", "genel", "sosyal", "serbest")) or bool(
+            re.match(r"^(?:US|USD|GS|GSD)\b", (c.code or "").strip().upper())
+        )
+
+        picked_idx = 0
+        if dept_prefix and len(elective_candidates) > 1:
+            if is_field_slot:
+                for idx, cand in enumerate(elective_candidates):
+                    if _norm_tr_code(cand.code).startswith(dept_prefix):
+                        picked_idx = idx
+                        break
+            elif is_univ_slot:
+                for idx, cand in enumerate(elective_candidates):
+                    if not _norm_tr_code(cand.code).startswith(dept_prefix):
+                        picked_idx = idx
+                        break
+
+        picked = elective_candidates.pop(picked_idx)
+        display_name = picked.name if "secmeli" in _fold_tr_notifier(picked.name) else f"{picked.name} (Seçmeli)"
+        picked_credit: Optional[float] = c.credit
+        if picked.credit:
+            try:
+                picked_credit = float(str(picked.credit).replace(",", "."))
+            except ValueError:
+                pass
+        resolved.append(
+            TranscriptCourse(
+                code=picked.code or c.code,
+                name=display_name,
+                credit=picked_credit,
+                ects=c.ects,
+                letter_grade=picked.letter_grade,
+            )
+        )
+
+    return resolved
 
 
 def select_transcript_semesters(
@@ -676,9 +848,7 @@ def select_transcript_semesters(
 
     last_graded_idx: Optional[int] = None
     for idx, sem in enumerate(semesters):
-        if any(bool(c.letter_grade) for c in sem.courses) or (
-            sem.semester_gpa is not None and sem.semester_gpa > 0.0
-        ):
+        if _semester_has_gpa_grades(sem):
             last_graded_idx = idx
 
     active_idx: Optional[int] = None
@@ -730,11 +900,9 @@ def format_transcript_summary(
         lines.append("📅 <b>Dönem Ortalamaları:</b>")
         for idx, sem in enumerate(summary.semesters):
             clean_name = re.sub(r"\s+\.", ".", sem.name).strip()
-            sem_has_grades = any(bool(c.letter_grade) for c in sem.courses) or (
-                sem.semester_gpa is not None and sem.semester_gpa > 0.0
-            )
+            sem_has_gpa = _semester_has_gpa_grades(sem)
             parts: list[str] = []
-            if not sem_has_grades and (sem.semester_gpa is None or sem.semester_gpa == 0.0):
+            if not sem_has_gpa and (sem.semester_gpa is None or sem.semester_gpa == 0.0):
                 if idx == active_idx:
                     parts.append("Aktif Dönem — Henüz not girilmedi")
                 elif active_idx >= 0 and idx > active_idx:
@@ -753,18 +921,26 @@ def format_transcript_summary(
 
         if active_sem is not None and active_sem.courses:
             active_name = re.sub(r"\s+\.", ".", active_sem.name).strip()
-            active_has_grades = any(bool(c.letter_grade) for c in active_sem.courses)
+            other_sems = [s for s in summary.semesters if s is not active_sem]
+            resolved_active = resolve_transcript_semester_courses(
+                active_sem,
+                active_courses=active_courses,
+                other_semesters=other_sems,
+            )
+            active_is_complete = _semester_has_gpa_grades(active_sem) and all(
+                bool(c.letter_grade) for c in resolved_active
+            )
             lines.append("")
-            if active_has_grades:
+            if active_is_complete:
                 lines.append(f"📚 <b>Son Notlu Dönem ({html.escape(active_name)}):</b>")
             else:
                 lines.append(f"📌 <b>Aktif Dönem ({html.escape(active_name)}):</b>")
-            for c in active_sem.courses[:15]:
+            for c in resolved_active[:15]:
                 grade_str = html.escape(c.letter_grade or "Devam Ediyor")
                 title = f"{c.code} - {c.name}" if c.code else c.name
                 lines.append(f"• {html.escape(title)}: <code>{grade_str}</code>")
-            if len(active_sem.courses) > 15:
-                lines.append(f"<i>... ve {len(active_sem.courses) - 15} ders daha.</i>")
+            if len(resolved_active) > 15:
+                lines.append(f"<i>... ve {len(resolved_active) - 15} ders daha.</i>")
 
         if (
             last_graded_sem is not None

@@ -2367,6 +2367,110 @@ class PolishAndReliabilityTests(unittest.TestCase):
         self.assertEqual(len(mmf_pdfs), 1)
         self.assertIn("bil_2_vize.pdf", mmf_pdfs[0].url)
 
+    def test_transcript_elective_resolution_and_staj_b_handling(self) -> None:
+        # 1. parse_transcript TakenCourses alt listesindeki gerçek seçmeli dersi ayrıştırmalı
+        nested_payload = {
+            "Transcripts": [
+                {
+                    "GANO": 2.86,
+                    "Semesters": [
+                        {
+                            "SemesterName": "3 . Yarıyıl",
+                            "SemesterAverage": 0.0,
+                            "Courses": [
+                                {
+                                    "CourseCode": "MS-III",
+                                    "CourseName": "MESLEKİ SEÇMELİ-III",
+                                    "TakenCourses": [
+                                        {
+                                            "CourseCode": "BPBS213",
+                                            "CourseName": "Nesne Tabanlı Programlama-I",
+                                            "Credit": 2,
+                                            "Ects": 4,
+                                            "Grade": "",
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        b64_nested = base64.b64encode(json.dumps(nested_payload).encode("utf-8")).decode("ascii")
+        nested_summary = parse_transcript(
+            f'<script>var _jsm = JSON.parse(Base64.decode("{b64_nested}"));</script>'
+        )
+        self.assertEqual(nested_summary.semesters[0].courses[0].code, "BPBS213")
+        self.assertEqual(nested_summary.semesters[0].courses[0].name, "Nesne Tabanlı Programlama-I")
+
+        # 2. Staj: B varken 3. Yarıyıl YANO: 0.00 / Son Notlu Dönem olmamalı ve MS-III / S-III çözülmeli
+        summary = TranscriptSummary(
+            gano=2.86,
+            semesters=[
+                TranscriptSemester(
+                    name="1 . Yarıyıl",
+                    semester_gpa=2.90,
+                    courses=[
+                        TranscriptCourse(code="BPBZ101", name="Bilgisayar Donanımı", letter_grade="DD"),
+                        TranscriptCourse(code="BPBZ103", name="Programlama Temelleri", letter_grade="BA"),
+                    ],
+                ),
+                TranscriptSemester(
+                    name="2 . Yarıyıl",
+                    semester_gpa=2.82,
+                    courses=[
+                        TranscriptCourse(code="BPBZ102", name="Algoritmalar", letter_grade="BB"),
+                    ],
+                ),
+                TranscriptSemester(
+                    name="3 . Yarıyıl",
+                    semester_gpa=0.00,
+                    courses=[
+                        TranscriptCourse(code="BPBZ201", name="İnternet Programcılığı"),
+                        TranscriptCourse(code="BPBZ203", name="Görsel Programlama I"),
+                        TranscriptCourse(code="BPBZ205", name="Mesleki Yabancı Dil I"),
+                        TranscriptCourse(code="BPBZ207", name="Bilgisayar Ağları"),
+                        TranscriptCourse(code="BPBZ209", name="İşletim Sistemleri"),
+                        TranscriptCourse(code="BPBZ211", name="Staj", letter_grade="B"),
+                        TranscriptCourse(code="MS-III", name="MESLEKİ SEÇMELİ-III"),
+                        TranscriptCourse(code="S-III", name="SEÇMELI-III"),
+                    ],
+                ),
+                TranscriptSemester(
+                    name="4 . Yarıyıl",
+                    semester_gpa=0.00,
+                    courses=[
+                        TranscriptCourse(code="BPBZ202", name="Sistem Analizi ve Tasarımı"),
+                    ],
+                ),
+            ],
+        )
+        active_courses = [
+            CourseGrade(semester="2026 - Güz", code="BPBZ201", name="İnternet Programcılığı"),
+            CourseGrade(semester="2026 - Güz", code="BPBZ203", name="Görsel Programlama I"),
+            CourseGrade(semester="2026 - Güz", code="BPBZ205", name="Mesleki Yabancı Dil I"),
+            CourseGrade(semester="2026 - Güz", code="BPBZ207", name="Bilgisayar Ağları"),
+            CourseGrade(semester="2026 - Güz", code="BPBZ209", name="İşletim Sistemleri"),
+            CourseGrade(semester="2026 - Güz", code="BPBS213", name="Nesne Tabanlı Programlama-I"),
+            CourseGrade(semester="2026 - Güz", code="BPBS231", name="Bilgisayarlı Kurgu Teknikleri"),
+            CourseGrade(semester="2026 - Güz", code="BPBZ101", name="Bilgisayar Donanımı"),
+        ]
+
+        msg = format_transcript_summary(summary, "https://ubys.kastamonu.edu.tr", active_courses=active_courses)
+        self.assertNotIn("YANO: 0.00", msg)
+        self.assertIn("• <b>3. Yarıyıl</b> (Aktif Dönem — Henüz not girilmedi)", msg)
+        self.assertIn("📌 <b>Aktif Dönem (3. Yarıyıl):</b>", msg)
+        self.assertIn("BPBZ211 - Staj: <code>B</code>", msg)
+        self.assertIn("BPBS213 - Nesne Tabanlı Programlama-I (Seçmeli)", msg)
+        self.assertIn("BPBS231 - Bilgisayarlı Kurgu Teknikleri (Seçmeli)", msg)
+        self.assertNotIn("MS-III", msg)
+        self.assertNotIn("S-III", msg)
+        self.assertNotIn("MESLEKİ SEÇMELİ-III", msg)
+        self.assertNotIn("BPBZ101 - Bilgisayar Donanımı (Seçmeli)", msg)
+        self.assertIn("📚 <b>Son Notlu Dönem (2. Yarıyıl):</b>", msg)
+        self.assertIn("BPBZ102 - Algoritmalar: <code>BB</code>", msg)
+
 
 if __name__ == "__main__":
     unittest.main()
