@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from bs4 import BeautifulSoup, Tag
 
-from .models import ExamScheduleItem, ScheduleSlot
+from .models import CourseGrade, ExamScheduleItem, ScheduleSlot
 
 _TR_DAYS = (
     "Pazartesi",
@@ -657,3 +657,50 @@ def find_exam_reminders(
         reminders.append((item, days_until))
     reminders.sort(key=lambda pair: (pair[1], pair[0].exam_date, pair[0].exam_time or ""))
     return reminders
+
+
+def _norm_course_code(raw: Optional[str]) -> str:
+    if not raw:
+        return ""
+    cleaned = re.sub(r"\.\d+$", "", str(raw).strip())
+    return re.sub(r"[\s\-_]+", "", cleaned).upper()
+
+
+def _norm_course_name(raw: Optional[str]) -> str:
+    if not raw:
+        return ""
+    text = _tr_lower(str(raw))
+    text = re.sub(r"\((?:şube|sube|grup|group|[a-z0-9]{1,3})\)", " ", text)
+    text = re.sub(r"\b[a-zçğıöşü]{2,6}\s*-?\s*\d{3,4}(?:\.\d+)?\b", " ", text)
+    text = re.sub(r"[^\wçğıöşü]+", " ", text)
+    return " ".join(text.split())
+
+
+def filter_slots_for_active_courses(
+    slots: list[ScheduleSlot],
+    active_courses: list[CourseGrade],
+) -> list[ScheduleSlot]:
+    """Ders programı slotlarını öğrencinin aktif dönemde aldığı derslerle eşleştirip filtreler."""
+    if not slots or not active_courses:
+        return []
+
+    active_codes = {_norm_course_code(c.code) for c in active_courses if _norm_course_code(c.code)}
+    active_names = {_norm_course_name(c.name) for c in active_courses if _norm_course_name(c.name)}
+
+    matched: list[ScheduleSlot] = []
+    for slot in slots:
+        s_code = _norm_course_code(slot.course_code)
+        s_name_code = re.sub(r"[\s\-_]+", "", (slot.course_name or "")).upper()
+        s_name = _norm_course_name(slot.course_name)
+
+        if s_code and active_codes and s_code in active_codes:
+            matched.append(slot)
+            continue
+        if active_codes and any(len(code) >= 4 and code in s_name_code for code in active_codes):
+            matched.append(slot)
+            continue
+        if s_name and active_names and s_name in active_names:
+            matched.append(slot)
+            continue
+
+    return matched

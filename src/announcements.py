@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import logging
 import re
-from typing import Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
@@ -251,11 +252,13 @@ KASTAMONU_UNIT_SITES: list[tuple[tuple[str, ...], str, str]] = [
     (("muhendislik ve mimarlik", "muhendislik fakultesi"), "MMF", "https://mmf.kastamonu.edu.tr/"),
     (("iktisadi ve idari", "iibf"), "İİBF", "https://iibf.kastamonu.edu.tr/"),
     (("fen fakultesi",), "Fen Fak.", "https://fen.kastamonu.edu.tr/"),
-    (("insan ve toplum bilimleri", "itbf", "edebiyat fakultesi"), "İTBF", "https://itbf.kastamonu.edu.tr/"),
+    (("insan ve toplum bilimleri", "itbf", "edebiyat fakultesi", "fen edebiyat"), "İTBF", "https://itbf.kastamonu.edu.tr/"),
     (("egitim fakultesi",), "Eğitim Fak.", "https://egitim.kastamonu.edu.tr/"),
     (("orman fakultesi",), "Orman Fak.", "https://orman.kastamonu.edu.tr/"),
     (("saglik bilimleri fakultesi",), "SBF", "https://sbf.kastamonu.edu.tr/"),
     (("tip fakultesi",), "Tıp Fak.", "https://tip.kastamonu.edu.tr/"),
+    (("dis hekimligi",), "Diş Hekimliği", "https://dis.kastamonu.edu.tr/"),
+    (("eczacilik",), "Eczacılık", "https://eczacilik.kastamonu.edu.tr/"),
     (("veteriner fakultesi",), "Veteriner", "https://veteriner.kastamonu.edu.tr/"),
     (("iletisim fakultesi",), "İletişim", "https://iletisim.kastamonu.edu.tr/"),
     (("ilahiyat fakultesi",), "İlahiyat", "https://ilahiyat.kastamonu.edu.tr/"),
@@ -265,6 +268,9 @@ KASTAMONU_UNIT_SITES: list[tuple[tuple[str, ...], str, str]] = [
     (("su urunleri",), "Su Ürünleri", "https://suurunleri.kastamonu.edu.tr/"),
     (("sivil havacilik", "shyo"), "SHYO", "https://shyo.kastamonu.edu.tr/"),
     (("yabanci diller yuksekokulu", "ydyo"), "YDYO", "https://ydyo.kastamonu.edu.tr/"),
+    (("fen bilimleri enstitusu",), "Fen Bilimleri Enst.", "https://fbe.kastamonu.edu.tr/"),
+    (("sosyal bilimler enstitusu",), "Sosyal Bilimler Enst.", "https://sbe.kastamonu.edu.tr/"),
+    (("saglik bilimleri enstitusu",), "Sağlık Bilimleri Enst.", "https://saglikbilimleri.kastamonu.edu.tr/"),
     (("arac rafet vergili", "arac meslek"), "Araç MYO", "https://aracmyo.kastamonu.edu.tr/"),
     (("taskopru meslek",), "Taşköprü MYO", "https://taskoprumyo.kastamonu.edu.tr/"),
     (("tosya meslek",), "Tosya MYO", "https://tosyamyo.kastamonu.edu.tr/"),
@@ -293,6 +299,9 @@ _EXAM_ANNOUNCE_KWS = (
     "merkezi sinav",
 )
 
+_EXAM_FILE_EXTS = (".pdf", ".xlsx", ".xls", ".docx")
+_IGNORE_PDF_KWS = ("yonetmelik", "yonerge", "kilavuz", "dilekce", "formu", "takvim_form")
+
 
 def infer_faculty_sources(
     program_hints: list[str],
@@ -319,6 +328,57 @@ def is_exam_announcement(ann: Announcement) -> bool:
     return any(kw in haystack for kw in _EXAM_ANNOUNCE_KWS)
 
 
+def infer_student_class_year(courses: Iterable[Any]) -> Optional[int]:
+    """Aktif ders kodlarındaki yüzlük basamaktan (örn. BPBZ201 -> 2) öğrencinin sınıf düzeyini tahmin eder."""
+    votes: Counter[int] = Counter()
+    for course in courses:
+        code = str(getattr(course, "code", "") or "")
+        match = re.search(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,6}\s*-?\s*([1-6])\d{2}", code)
+        if match:
+            yr = int(match.group(1))
+            if 1 <= yr <= 6:
+                votes[yr] += 1
+    if not votes:
+        return None
+    return votes.most_common(1)[0][0]
+
+
+def _extract_program_terms(program_hints: list[str]) -> list[str]:
+    stop = {"fakultesi", "yuksekokulu", "meslek", "enstitusu", "bolumu", "programi", "program", "kastamonu", "universitesi"}
+    terms: list[str] = []
+    for raw in program_hints:
+        folded = _fold_tr(raw)
+        if not folded:
+            continue
+        for part in re.split(r"[-/|(),]+", folded):
+            cleaned = re.sub(r"\b(?:fakultesi|yuksekokulu|bolumu|programi|pr\.?)\b", "", part).strip()
+            if len(cleaned) >= 5 and cleaned not in stop and cleaned not in terms:
+                terms.append(cleaned)
+    return terms
+
+
+def _find_unit_exam_menu_url(unit_html: str, unit_base_url: str) -> Optional[str]:
+    soup = BeautifulSoup(unit_html or "", "html.parser")
+    best_url: Optional[str] = None
+    best_score = 0
+    for a in soup.find_all("a", href=True):
+        href = str(a["href"]).strip()
+        if not href or href.startswith("#") or href.startswith("javascript:") or href.startswith("mailto:"):
+            continue
+        txt = _fold_tr(a.get_text(" ", strip=True))
+        low_href = _fold_tr(href)
+        if "sinav program" in txt or "sinav takvim" in txt:
+            score = 100
+        elif "sinav-program" in low_href or "sinav-takvim" in low_href or "sinav_program" in low_href:
+            score = 80
+        else:
+            continue
+        if score > best_score:
+            best_score = score
+            best_url = urljoin(unit_base_url, href)
+    return best_url
+
+
 def parse_department_program_url(
     unit_html: str,
     unit_base_url: str,
@@ -327,26 +387,60 @@ def parse_department_program_url(
     """Birim ana sayfası menüsünden öğrencinin bölüm/program sayfası linkini bulur."""
     soup = BeautifulSoup(unit_html or "", "html.parser")
     folded_hints = [_fold_tr(h) for h in program_hints if _fold_tr(h)]
-    if not folded_hints:
+    program_terms = _extract_program_terms(program_hints)
+    if not folded_hints and not program_terms:
         return None
 
     best_score = 0
     best_url: Optional[str] = None
+    generic_skip = {"fakulte", "fakultesi", "bolum", "bolumler", "program", "programlar", "yuksekokul"}
     for a in soup.find_all("a", href=True):
         href = str(a["href"]).strip()
         if not href or href == "#" or href.startswith("javascript:") or href.startswith("mailto:"):
             continue
         link_txt = _fold_tr(a.get_text(" ", strip=True))
-        if not link_txt or len(link_txt) < 4:
+        if not link_txt or len(link_txt) < 5 or link_txt in generic_skip:
             continue
-        # "Bölüm / Program Adı" içeren tam eşleşme en yüksek puanı alır
+        href_bonus = 50 if any(seg in href.lower() for seg in ("/boeluemler/", "/bolumler/", "/bolum", "/program", "/anabilim")) else 0
         for hint in folded_hints:
             if link_txt in hint or any(part.strip() == link_txt for part in re.split(r"[-/|]", hint)):
-                score = len(link_txt) + (50 if "/boeluemler/" in href.lower() or "/bolum" in href.lower() else 0)
+                score = len(link_txt) + href_bonus + 20
+                if score > best_score:
+                    best_score = score
+                    best_url = urljoin(unit_base_url, href)
+        for term in program_terms:
+            if term in link_txt:
+                score = len(term) + href_bonus
                 if score > best_score:
                     best_score = score
                     best_url = urljoin(unit_base_url, href)
     return best_url
+
+
+def _score_exam_pdf_candidate(
+    title: str,
+    abs_url: str,
+    program_terms: list[str],
+    class_year: Optional[int],
+) -> int:
+    hay = _fold_tr(f"{title} {abs_url.rsplit('/', 1)[-1]}")
+    score = 0
+    for term in program_terms:
+        if term in hay:
+            score += 200
+        else:
+            words = [w for w in term.split() if len(w) >= 4]
+            if words and all(w in hay for w in words):
+                score += 140
+    if any(kw in hay for kw in ("2026", "2027", "guz", "bahar", "vize", "ara sinav", "final", "butunleme")):
+        score += 30
+    if class_year in (1, 2, 3, 4):
+        if re.search(rf"\b{class_year}\s*[.\-_ ]*\s*sinif\b", hay):
+            score += 120
+        for other in (1, 2, 3, 4):
+            if other != class_year and re.search(rf"\b{other}\s*[.\-_ ]*\s*sinif\b", hay):
+                score -= 80
+    return score
 
 
 def parse_department_exam_pdfs(
@@ -354,8 +448,11 @@ def parse_department_exam_pdfs(
     dept_base_url: str,
     source_label: str,
     max_items: int = 2,
+    program_hints: Optional[list[str]] = None,
+    class_year: Optional[int] = None,
+    allow_general_page: bool = False,
 ) -> list[Announcement]:
-    """Bölüm sayfasındaki 'Sınav Programları' sekmesinden aktif dönem PDF/Excel takvimlerini çıkarır."""
+    """Bölüm sayfasındaki 'Sınav Programları' sekmesinden veya sınav duyurusu gövdesinden aktif PDF/Excel takvimlerini çıkarır."""
     soup = BeautifulSoup(dept_html or "", "html.parser")
     target_pane_ids: list[str] = []
     for tab_a in soup.find_all("a", href=True):
@@ -365,15 +462,29 @@ def parse_department_exam_pdfs(
             target_pane_ids.append(href[1:])
 
     containers = []
+    is_tab_mode = False
     for pid in target_pane_ids:
         pane = soup.find(id=pid)
         if pane is not None:
             containers.append(pane)
-    if not containers:
+    if containers:
+        is_tab_mode = True
+    elif allow_general_page:
+        for sel in ('div[itemprop="articleBody"]', "div.item-page", "article", "main"):
+            node = soup.select_one(sel)
+            if node is not None:
+                containers.append(node)
+                break
+        if not containers and soup.body is not None:
+            containers.append(soup.body)
+    else:
         return []
 
-    results: list[Announcement] = []
+    program_terms = _extract_program_terms(program_hints or [])
+    scored_results: list[tuple[int, int, Announcement]] = []
     seen_urls: set[str] = set()
+    order_idx = 0
+
     for pane in containers:
         # "Önceki Dönem..." başlığından sonraki arşiv bağlantılarını atla
         for tag in pane.find_all(["p", "li", "h1", "h2", "h3", "h4", "strong", "span", "a"], recursive=True):
@@ -384,18 +495,16 @@ def parse_department_exam_pdfs(
             if tag.name != "a" or not tag.get("href"):
                 continue
             href = str(tag["href"]).strip()
-            low_h = href.lower()
-            if not any(low_h.split("?")[0].endswith(ext) for ext in (".pdf", ".xlsx", ".xls", ".docx")):
+            low_h = href.lower().split("?")[0]
+            if not any(low_h.endswith(ext) for ext in _EXAM_FILE_EXTS):
                 continue
             abs_url = urljoin(dept_base_url, href)
             canon = _canonicalize_url(abs_url)
             if canon in seen_urls:
                 continue
 
-            # Önceki kardeş metinden başlığı çıkar ("... Takvimi için TIKLAYINIZ")
             parent_blk = tag.find_parent(["p", "li", "tr"]) or tag.parent
             blk_text = _clean_text(parent_blk.get_text(" ", strip=True)) if parent_blk else ""
-            # Bir paragraf birden çok yıl içeriyorsa sadece ilk link öncesi veya başlık parçasını al
             link_txt = _clean_text(tag.get_text(" ", strip=True))
             if link_txt and link_txt in blk_text:
                 before = blk_text.split(link_txt, 1)[0]
@@ -403,36 +512,54 @@ def parse_department_exam_pdfs(
                 before = blk_text
             cleaned_title = re.sub(r"\s+i[çc]in\s*$", "", before.strip(" .:;-"), flags=re.IGNORECASE).strip()
             if len(cleaned_title) < 8:
-                cleaned_title = abs_url.rsplit("/", 1)[-1]
-            # Önceki yıllara ait çoklu blok ise durdur
-            if re.search(r"\b20(?:20|21|22|23|24)\b", _fold_tr(cleaned_title)):
+                cleaned_title = link_txt if len(link_txt) >= 8 and _fold_tr(link_txt) not in {"tiklayiniz", "indir"} else abs_url.rsplit("/", 1)[-1]
+            folded_all = _fold_tr(f"{cleaned_title} {link_txt} {abs_url}")
+            if re.search(r"\b20(?:20|21|22|23|24)\b", folded_all):
+                continue
+            if any(bad in folded_all for bad in _IGNORE_PDF_KWS):
+                continue
+            if not is_tab_mode and not any(
+                kw in folded_all
+                for kw in ("sinav", "vize", "final", "butunleme", "program", "takvim", *program_terms)
+            ):
                 continue
 
             seen_urls.add(canon)
-            results.append(
-                Announcement(
-                    announcement_id=make_announcement_id(f"{source_label} Sınav PDF", abs_url, cleaned_title),
-                    source=f"{source_label} Sınav PDF",
-                    title=cleaned_title[:180],
-                    url=abs_url,
-                )
+            ann = Announcement(
+                announcement_id=make_announcement_id(f"{source_label} Sınav PDF", abs_url, cleaned_title),
+                source=f"{source_label} Sınav PDF",
+                title=cleaned_title[:180],
+                url=abs_url,
             )
-            if len(results) >= max_items:
-                return results
-    return results
+            score = _score_exam_pdf_candidate(cleaned_title, abs_url, program_terms, class_year)
+            scored_results.append((score, order_idx, ann))
+            order_idx += 1
+
+    if not scored_results:
+        return []
+    scored_results.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in scored_results[:max_items]]
 
 
 def fetch_department_exam_links(
     unit_sources: list[tuple[str, str]],
     program_hints: list[str],
     timeout: float = 20.0,
+    class_year: Optional[int] = None,
 ) -> list[Announcement]:
-    """Birim sitesi + bölüm sayfası üzerinden aktif sınav programı PDF bağlantılarını toplar."""
+    """Birim sitesi, bölüm sayfası ve sınav duyuruları üzerinden aktif sınav programı PDF/Excel bağlantılarını toplar."""
     if not unit_sources or not program_hints:
         return []
 
     found: list[Announcement] = []
     seen_ids: set[str] = set()
+
+    def _collect(items: list[Announcement]) -> None:
+        for pdf_ann in items:
+            if pdf_ann.announcement_id not in seen_ids:
+                seen_ids.add(pdf_ann.announcement_id)
+                found.append(pdf_ann)
+
     with httpx.Client(
         headers={"User-Agent": _USER_AGENT, "Accept-Language": "tr-TR,tr;q=0.9"},
         follow_redirects=True,
@@ -443,16 +570,52 @@ def fetch_department_exam_links(
                 u_resp = client.get(unit_url)
                 if u_resp.status_code >= 400:
                     continue
-                dept_url = parse_department_program_url(u_resp.text, str(u_resp.url), program_hints)
-                if not dept_url:
-                    continue
-                d_resp = client.get(dept_url)
-                if d_resp.status_code >= 400:
-                    continue
-                for pdf_ann in parse_department_exam_pdfs(d_resp.text, str(d_resp.url), label):
-                    if pdf_ann.announcement_id not in seen_ids:
-                        seen_ids.add(pdf_ann.announcement_id)
-                        found.append(pdf_ann)
+                unit_final_url = str(u_resp.url)
+
+                # 1. Öncelik: Birim menüsündeki öğrencinin bölüm/program sayfası
+                dept_url = parse_department_program_url(u_resp.text, unit_final_url, program_hints)
+                unit_found_count = 0
+                if dept_url:
+                    d_resp = client.get(dept_url)
+                    if d_resp.status_code < 400:
+                        dept_pdfs = parse_department_exam_pdfs(
+                            d_resp.text,
+                            str(d_resp.url),
+                            label,
+                            program_hints=program_hints,
+                            class_year=class_year,
+                            allow_general_page=False,
+                        )
+                        _collect(dept_pdfs)
+                        unit_found_count += len(dept_pdfs)
+
+                # 2. Yedek (Fakülteler): Birim menüsündeki 'Sınav Programları' sayfası veya sınav duyurusu detay sayfası
+                if unit_found_count == 0:
+                    candidate_pages: list[str] = []
+                    exam_menu_url = _find_unit_exam_menu_url(u_resp.text, unit_final_url)
+                    if exam_menu_url:
+                        candidate_pages.append(exam_menu_url)
+                    unit_anns = parse_announcements_html(u_resp.text, source_name=label, base_url=unit_final_url)
+                    for ann in unit_anns:
+                        if is_exam_announcement(ann) and ann.url not in candidate_pages:
+                            candidate_pages.append(ann.url)
+                        if len(candidate_pages) >= 3:
+                            break
+                    for page_url in candidate_pages[:2]:
+                        p_resp = client.get(page_url)
+                        if p_resp.status_code >= 400:
+                            continue
+                        page_pdfs = parse_department_exam_pdfs(
+                            p_resp.text,
+                            str(p_resp.url),
+                            label,
+                            program_hints=program_hints,
+                            class_year=class_year,
+                            allow_general_page=True,
+                        )
+                        _collect(page_pdfs)
+                        if page_pdfs:
+                            break
             except Exception as exc:
                 logger.debug("Bölüm sınav PDF'leri alınamadı (%s): %s", label, exc)
     return found

@@ -20,7 +20,11 @@ from .models import (
     ScheduleSlot,
     TranscriptSummary,
 )
-from .schedule import parse_exam_schedule, parse_weekly_schedule
+from .schedule import (
+    filter_slots_for_active_courses,
+    parse_exam_schedule,
+    parse_weekly_schedule,
+)
 from .ubys_parser import (
     ParseError,
     SessionExpiredError,
@@ -106,6 +110,7 @@ class UBYSClient:
         self._student_info: Optional[dict[str, Any]] = None
         self._ajax_csrf: Optional[str] = None
         self._last_schedule_html: Optional[str] = None
+        self._last_active_courses: list[CourseGrade] = []
 
     @property
     def last_home_gano(self) -> Optional[float]:
@@ -127,6 +132,11 @@ class UBYSClient:
         """Öğrenci ana sayfasından keşfedilen statik AIS rotalarını döndürür."""
         return list(self._home_routes)
 
+    @property
+    def last_active_courses(self) -> list[CourseGrade]:
+        """Son çekilen aktif dönem ders listesini döndürür."""
+        return list(self._last_active_courses)
+
     def __enter__(self) -> UBYSClient:
         return self
 
@@ -143,6 +153,7 @@ class UBYSClient:
         self._exam_schedule_url = None
         self._home_announcements = []
         self._program_hints = []
+        self._last_active_courses = []
 
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -458,6 +469,13 @@ class UBYSClient:
                         exc,
                     )
 
+        if courses:
+            if not all_semesters:
+                self._last_active_courses = list(courses)
+            else:
+                latest_sem = courses[0].semester
+                self._last_active_courses = [c for c in courses if c.semester == latest_sem]
+
         return courses
 
     def fetch_transcript(self, dump_dir: Optional[Path] = None) -> TranscriptSummary:
@@ -530,39 +548,53 @@ class UBYSClient:
         semester_hint: Optional[str] = None,
     ) -> list[tuple[int, str]]:
         candidates: list[tuple[int, str]] = []
+        hint_sem_code: Optional[str] = None
+        hint_year: Optional[int] = None
 
         if semester_hint:
             yr_m = re.search(r"(\d{4})", semester_hint)
             low_hint = semester_hint.replace("İ", "i").replace("I", "ı").lower()
-            sem_code: Optional[str] = None
             if "güz" in low_hint or "guz" in low_hint:
-                sem_code = "1"
+                hint_sem_code = "1"
             elif "bahar" in low_hint:
-                sem_code = "2"
+                hint_sem_code = "2"
             elif "yaz" in low_hint:
-                sem_code = "3"
-            if yr_m and sem_code:
-                y_val = int(yr_m.group(1))
-                candidates.append((y_val, sem_code))
-                if sem_code == "2":
-                    candidates.append((y_val - 1, sem_code))
+                hint_sem_code = "3"
+            if yr_m:
+                hint_year = int(yr_m.group(1))
+            if hint_year is not None and hint_sem_code:
+                candidates.append((hint_year, hint_sem_code))
+                candidates.append((hint_year + 1, hint_sem_code))
+                candidates.append((hint_year - 1, hint_sem_code))
 
         today = date.today()
         if today.month >= 9:
-            candidates.append((today.year, "1"))
+            cur_year, cur_sem = today.year, "1"
         elif today.month == 1:
-            candidates.append((today.year - 1, "1"))
+            cur_year, cur_sem = today.year - 1, "1"
         elif 2 <= today.month <= 6:
-            candidates.append((today.year - 1, "2"))
-            candidates.append((today.year, "2"))
+            cur_year, cur_sem = today.year - 1, "2"
         else:
-            candidates.append((today.year - 1, "3"))
+            cur_year, cur_sem = today.year - 1, "3"
+
+        primary_sem = hint_sem_code or cur_sem
+        for key in ("ActiveYear", "CurrentYear", "AcademicYear", "Year"):
+            prog_yr = _safe_int(program.get(key))
+            if prog_yr is not None:
+                candidates.append((prog_yr, primary_sem))
+
+        for yr in (cur_year, cur_year + 1, cur_year - 1):
+            candidates.append((yr, cur_sem))
+        if cur_sem == "2":
+            candidates.append((today.year, "2"))
 
         rec_year = _safe_int(program.get("RecordYear"))
         rec_sem = str(program.get("RecordSemester") or "").strip()
-        if rec_year is not None and rec_sem:
-            candidates.append((rec_year + 1, rec_sem))
-            candidates.append((rec_year, rec_sem))
+        if rec_year is not None:
+            for offset in (2, 1, 3, 0):
+                candidates.append((rec_year + offset, primary_sem))
+                if rec_sem and rec_sem != primary_sem:
+                    candidates.append((rec_year + offset, rec_sem))
 
         seen: set[tuple[int, str]] = set()
         unique: list[tuple[int, str]] = []
@@ -576,6 +608,7 @@ class UBYSClient:
         self,
         dump_dir: Optional[Path] = None,
         semester_hint: Optional[str] = None,
+        active_courses: Optional[list[CourseGrade]] = None,
     ) -> list[ScheduleSlot]:
         """Öğrencinin haftalık ders programını Netix GetWeeklySchedule POST ve GET rotalarından çeker."""
         if not self._logged_in:
@@ -583,11 +616,25 @@ class UBYSClient:
         if self._student_info is None and self._sap_id is None:
             self._fetch_home_metadata(dump_dir=dump_dir)
 
+        enrolled = list(active_courses) if active_courses is not None else list(self._last_active_courses)
+        if not semester_hint and enrolled:
+            semester_hint = enrolled[0].semester
+
+        def _match_active(slots: list[ScheduleSlot]) -> list[ScheduleSlot]:
+            if not slots:
+                return []
+            if not enrolled:
+                return slots
+            return filter_slots_for_active_courses(slots, enrolled)
+
         programs = (self._student_info or {}).get("Programs") or []
-        if isinstance(programs, list) and programs and isinstance(programs[0], dict):
-            program = programs[0]
-            student_id = program.get("StudentId")
-            if student_id is not None:
+        if isinstance(programs, list):
+            for program in programs:
+                if not isinstance(program, dict):
+                    continue
+                student_id = program.get("StudentId")
+                if student_id is None:
+                    continue
                 post_url = f"{self.base_url}/AIS/Student/Home/GetWeeklySchedule"
                 post_headers = {
                     "Content-Type": "application/json; charset=UTF-8",
@@ -619,13 +666,24 @@ class UBYSClient:
                             raise SessionExpiredError("Ders programı alınırken oturum düştü.")
                         if resp.status_code >= 400:
                             continue
-                        if dump_dir is not None:
-                            dump_dir.mkdir(parents=True, exist_ok=True)
-                            (dump_dir / "weekly_schedule.html").write_text(resp.text, encoding="utf-8")
-                        self._last_schedule_html = resp.text
+                        if not self._last_schedule_html:
+                            self._last_schedule_html = resp.text
                         slots = parse_weekly_schedule(resp.text)
-                        if slots:
-                            return slots
+                        if not slots:
+                            continue
+                        matched = _match_active(slots)
+                        if matched:
+                            if dump_dir is not None:
+                                dump_dir.mkdir(parents=True, exist_ok=True)
+                                (dump_dir / "weekly_schedule.html").write_text(resp.text, encoding="utf-8")
+                            self._last_schedule_html = resp.text
+                            return matched
+                        logger.debug(
+                            "GetWeeklySchedule (%s-%s) %d ders döndürdü ama aktif dönem dersleriyle eşleşmedi; atlanıyor.",
+                            yr,
+                            sem_id,
+                            len(slots),
+                        )
                     except SessionExpiredError:
                         raise
                     except Exception as exc:
@@ -650,13 +708,18 @@ class UBYSClient:
                     raise SessionExpiredError("Ders programı alınırken oturum düştü.")
                 if resp.status_code >= 400:
                     continue
-                if dump_dir is not None:
-                    dump_dir.mkdir(parents=True, exist_ok=True)
-                    (dump_dir / "weekly_schedule.html").write_text(resp.text, encoding="utf-8")
-                self._last_schedule_html = resp.text
+                if not self._last_schedule_html:
+                    self._last_schedule_html = resp.text
                 slots = parse_weekly_schedule(resp.text)
-                if slots:
-                    return slots
+                if not slots:
+                    continue
+                matched = _match_active(slots)
+                if matched:
+                    if dump_dir is not None:
+                        dump_dir.mkdir(parents=True, exist_ok=True)
+                        (dump_dir / "weekly_schedule.html").write_text(resp.text, encoding="utf-8")
+                    self._last_schedule_html = resp.text
+                    return matched
             except SessionExpiredError:
                 raise
             except Exception as exc:

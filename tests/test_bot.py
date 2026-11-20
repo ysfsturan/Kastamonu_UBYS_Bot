@@ -16,6 +16,7 @@ import httpx
 from src.announcements import (
     filter_new_announcements,
     infer_faculty_sources,
+    infer_student_class_year,
     is_exam_announcement,
     make_announcement_id,
     parse_announcements_html,
@@ -116,10 +117,12 @@ from src.notifier import (
     format_weather_report,
     format_weekly_briefing,
     format_weekly_schedule,
+    select_transcript_semesters,
     split_message,
 )
 from src.schedule import (
     exam_reminder_key,
+    filter_slots_for_active_courses,
     find_exam_reminders,
     get_slots_for_day,
     parse_exam_schedule,
@@ -2073,8 +2076,21 @@ class PolishAndReliabilityTests(unittest.TestCase):
         self.assertIn("2. Yarıyıl", t_msg)
         self.assertIn("Henüz not girilmedi", t_msg)
         self.assertNotIn("YANO: 0.00", t_msg)
+        self.assertIn("Aktif Dönem (3. Yarıyıl)", t_msg)
+        self.assertIn("BPZ201 - İnternet Prog.", t_msg)
+        self.assertIn("Gelecek Dönem", t_msg)
+        self.assertNotIn("BPZ202 - Sistem Analizi", t_msg)
         self.assertIn("Son Notlu Dönem (2. Yarıyıl)", t_msg)
         self.assertIn("BPZ102 - Algoritmalar", t_msg)
+
+        act_sem, grad_sem, act_idx = select_transcript_semesters(
+            tr,
+            active_courses=[CourseGrade(semester="2026 - Güz", code="BPZ201", name="İnternet Prog.")],
+        )
+        assert act_sem is not None and grad_sem is not None
+        self.assertEqual(act_idx, 1)
+        self.assertIn("3", act_sem.name)
+        self.assertIn("2", grad_sem.name)
 
         c_msg = format_test_summary(
             [
@@ -2229,6 +2245,127 @@ class PolishAndReliabilityTests(unittest.TestCase):
         exam_msg = format_exam_schedule([], date(2026, 11, 20), "https://ubys.kastamonu.edu.tr", exam_announcements=pdfs)
         self.assertIn("Bölüm / Fakülte Sınav Programı", exam_msg)
         self.assertIn("bil.pdf", exam_msg)
+
+    def test_second_year_schedule_filtering_and_university_wide_exam_pdfs(self) -> None:
+        # 1. sınıf derslerini içeren yanlış yıl yanıtını reddedip 2. sınıf adayını ve karma programda sadece aktif dersleri seçmeli
+        second_year_courses = [
+            CourseGrade(semester="2026 - Güz", code="BPBZ201", name="İnternet Programcılığı"),
+            CourseGrade(semester="2026 - Güz", code="BPBZ207", name="Bilgisayar Ağları"),
+        ]
+        self.assertEqual(infer_student_class_year(second_year_courses), 2)
+
+        first_year_only_payload = [
+            {
+                "Events": [
+                    {
+                        "DayOfWeek": 1,
+                        "StartHour": 9,
+                        "StartMinute": 0,
+                        "FinishHour": 10,
+                        "FinishMinute": 45,
+                        "CourseName": "BPBZ101.1 Bilgi ve İletişim Teknolojisi",
+                        "WorkCenterName": "Derslik 101",
+                    }
+                ]
+            }
+        ]
+        mixed_second_year_payload = [
+            {
+                "Events": [
+                    {
+                        "DayOfWeek": 1,
+                        "StartHour": 9,
+                        "StartMinute": 0,
+                        "FinishHour": 10,
+                        "FinishMinute": 45,
+                        "CourseName": "BPBZ101.1 Bilgi ve İletişim Teknolojisi",
+                        "WorkCenterName": "Derslik 101",
+                    },
+                    {
+                        "DayOfWeek": 2,
+                        "StartHour": 10,
+                        "StartMinute": 0,
+                        "FinishHour": 11,
+                        "FinishMinute": 45,
+                        "CourseName": "BPBZ201.1 İnternet Programcılığı",
+                        "WorkCenterName": "Lab-2",
+                    },
+                    {
+                        "DayOfWeek": 4,
+                        "StartHour": 13,
+                        "StartMinute": 0,
+                        "FinishHour": 14,
+                        "FinishMinute": 45,
+                        "CourseName": "BPBZ207.1 Bilgisayar Ağları",
+                        "WorkCenterName": "Derslik 104",
+                    },
+                ]
+            }
+        ]
+        b64_first = base64.b64encode(json.dumps(first_year_only_payload).encode("utf-8")).decode("ascii")
+        b64_mixed = base64.b64encode(json.dumps(mixed_second_year_payload).encode("utf-8")).decode("ascii")
+        html_first = f'<script>var _weeklySchedulle = JSON.parse(Base64.decode("{b64_first}"));</script>'
+        html_mixed = f'<script>var _weeklySchedulle = JSON.parse(Base64.decode("{b64_mixed}"));</script>'
+
+        # filter_slots_for_active_courses I. ve II. dersleri karıştırmamalı
+        parsed_mixed = parse_weekly_schedule(html_mixed)
+        filtered = filter_slots_for_active_courses(parsed_mixed, second_year_courses)
+        self.assertEqual([s.course_code for s in filtered], ["BPBZ201", "BPBZ207"])
+
+        student_info_json = base64.b64encode(
+            json.dumps(
+                {
+                    "Programs": [
+                        {
+                            "StudentId": 554433,
+                            "RecordYear": 2025,
+                            "RecordSemester": 1,
+                            "UnitName": "Kastamonu Meslek Yüksekokulu",
+                            "AcademicProgramName": "Bilgisayar Programcılığı",
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+        ).decode("ascii")
+        home_stub = f'<script>var StudentInfo = JSON.parse(Base64.decode("{student_info_json}"));</script>'
+
+        with UBYSClient("https://ubys.kastamonu.edu.tr") as ubys:
+            ubys._logged_in = True
+            with patch.object(ubys, "_request") as mock_req:
+                mock_req.side_effect = [
+                    MagicMock(status_code=200, url="https://ubys.kastamonu.edu.tr/AIS/Student/Home/Index", text=home_stub),
+                    MagicMock(status_code=200, url="https://ubys.kastamonu.edu.tr/AIS/Student/Home/GetWeeklySchedule", text=html_first),
+                    MagicMock(status_code=200, url="https://ubys.kastamonu.edu.tr/AIS/Student/Home/GetWeeklySchedule", text=html_mixed),
+                ]
+                res_slots = ubys.fetch_weekly_schedule(
+                    semester_hint="2026 - Güz",
+                    active_courses=second_year_courses,
+                )
+        self.assertEqual([s.course_code for s in res_slots], ["BPBZ201", "BPBZ207"])
+        self.assertEqual(mock_req.call_count, 3)
+
+        # Sekmesiz genel fakülte sınav duyurusu gövdesinden bölüm + sınıf eşleşmeli PDF çıkarımı (üniversite geneli)
+        mmf_units = infer_faculty_sources(["Mühendislik ve Mimarlık Fakültesi - Bilgisayar Mühendisliği"])
+        self.assertEqual(mmf_units, [("MMF", "https://mmf.kastamonu.edu.tr/")])
+
+        mmf_article_html = """
+        <div itemprop="articleBody">
+          <p>Makine Mühendisliği Vize Sınav Programı için <a href="/files/makine_vize.pdf">Tıklayınız</a></p>
+          <p>Bilgisayar Mühendisliği 1. Sınıf 2026-2027 Güz Vize Sınav Programı için <a href="/files/bil_1_vize.pdf">Tıklayınız</a></p>
+          <p>Bilgisayar Mühendisliği 2. Sınıf 2026-2027 Güz Vize Sınav Programı için <a href="/files/bil_2_vize.pdf">Tıklayınız</a></p>
+        </div>
+        """
+        mmf_pdfs = parse_department_exam_pdfs(
+            mmf_article_html,
+            "https://mmf.kastamonu.edu.tr/duyurular/vize-programi",
+            "MMF",
+            max_items=1,
+            program_hints=["Mühendislik ve Mimarlık Fakültesi", "Bilgisayar Mühendisliği"],
+            class_year=2,
+            allow_general_page=True,
+        )
+        self.assertEqual(len(mmf_pdfs), 1)
+        self.assertIn("bil_2_vize.pdf", mmf_pdfs[0].url)
 
 
 if __name__ == "__main__":

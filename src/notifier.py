@@ -25,6 +25,7 @@ from .models import (
     GradeChange,
     GradeTargetAnalysis,
     ScheduleSlot,
+    TranscriptSemester,
     TranscriptSummary,
     WeatherForecast,
 )
@@ -658,7 +659,59 @@ def format_grade_calculator(analysis: GradeTargetAnalysis) -> str:
     return "\n".join(lines)
 
 
-def format_transcript_summary(summary: TranscriptSummary, base_url: str) -> str:
+def _norm_tr_code(code: Optional[str]) -> str:
+    if not code:
+        return ""
+    return re.sub(r"[\s\-_]+", "", re.sub(r"\.\d+$", "", str(code).strip())).upper()
+
+
+def select_transcript_semesters(
+    summary: TranscriptSummary,
+    active_courses: Optional[list[CourseGrade]] = None,
+) -> tuple[Optional[TranscriptSemester], Optional[TranscriptSemester], int]:
+    """Transkriptten aktif dönemi, son notlu dönemi ve aktif dönem indeksini bulur."""
+    semesters = summary.semesters
+    if not semesters:
+        return None, None, -1
+
+    last_graded_idx: Optional[int] = None
+    for idx, sem in enumerate(semesters):
+        if any(bool(c.letter_grade) for c in sem.courses) or (
+            sem.semester_gpa is not None and sem.semester_gpa > 0.0
+        ):
+            last_graded_idx = idx
+
+    active_idx: Optional[int] = None
+    if active_courses:
+        active_codes = {_norm_tr_code(c.code) for c in active_courses if _norm_tr_code(c.code)}
+        if active_codes:
+            best_overlap = 0
+            for idx, sem in enumerate(semesters):
+                sem_codes = {_norm_tr_code(c.code) for c in sem.courses if _norm_tr_code(c.code)}
+                overlap = len(active_codes & sem_codes)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    active_idx = idx
+
+    if active_idx is None:
+        if last_graded_idx is not None and last_graded_idx + 1 < len(semesters) and semesters[last_graded_idx + 1].courses:
+            active_idx = last_graded_idx + 1
+        elif last_graded_idx is not None:
+            active_idx = last_graded_idx
+        else:
+            first_with_courses = next((i for i, s in enumerate(semesters) if s.courses), None)
+            active_idx = first_with_courses if first_with_courses is not None else len(semesters) - 1
+
+    active_sem = semesters[active_idx]
+    last_graded_sem = semesters[last_graded_idx] if last_graded_idx is not None else None
+    return active_sem, last_graded_sem, active_idx
+
+
+def format_transcript_summary(
+    summary: TranscriptSummary,
+    base_url: str,
+    active_courses: Optional[list[CourseGrade]] = None,
+) -> str:
     """Transkript ve GANO özetini Telegram HTML mesajına dönüştürür."""
     lines = ["🎓 <b>Kastamonu ÜBYS Transkript Özeti</b>", ""]
     if summary.gano is not None:
@@ -669,16 +722,25 @@ def format_transcript_summary(summary: TranscriptSummary, base_url: str) -> str:
         lines.append(f"📗 <b>Toplam AKTS:</b> <code>{summary.total_ects:g}</code>")
 
     if summary.semesters:
+        active_sem, last_graded_sem, active_idx = select_transcript_semesters(
+            summary,
+            active_courses=active_courses,
+        )
         lines.append("")
         lines.append("📅 <b>Dönem Ortalamaları:</b>")
-        for sem in summary.semesters:
+        for idx, sem in enumerate(summary.semesters):
             clean_name = re.sub(r"\s+\.", ".", sem.name).strip()
             sem_has_grades = any(bool(c.letter_grade) for c in sem.courses) or (
                 sem.semester_gpa is not None and sem.semester_gpa > 0.0
             )
             parts: list[str] = []
             if not sem_has_grades and (sem.semester_gpa is None or sem.semester_gpa == 0.0):
-                parts.append("Henüz not girilmedi")
+                if idx == active_idx:
+                    parts.append("Aktif Dönem — Henüz not girilmedi")
+                elif active_idx >= 0 and idx > active_idx:
+                    parts.append("Gelecek Dönem")
+                else:
+                    parts.append("Henüz not girilmedi")
             else:
                 if sem.semester_gpa is not None:
                     parts.append(f"YANO: {sem.semester_gpa:.2f}")
@@ -689,23 +751,35 @@ def format_transcript_summary(summary: TranscriptSummary, base_url: str) -> str:
             suffix = f" ({' | '.join(parts)})" if parts else ""
             lines.append(f"• <b>{html.escape(clean_name)}</b>{html.escape(suffix)}")
 
-        graded_sems = [s for s in summary.semesters if any(bool(c.letter_grade) for c in s.courses)]
-        latest = graded_sems[-1] if graded_sems else summary.semesters[-1]
-        latest_name = re.sub(r"\s+\.", ".", latest.name).strip()
-        latest_heading = (
-            f"📚 <b>Son Notlu Dönem ({html.escape(latest_name)}):</b>"
-            if graded_sems
-            else f"📚 <b>Son Dönem ({html.escape(latest_name)}):</b>"
-        )
-        if latest.courses:
+        if active_sem is not None and active_sem.courses:
+            active_name = re.sub(r"\s+\.", ".", active_sem.name).strip()
+            active_has_grades = any(bool(c.letter_grade) for c in active_sem.courses)
             lines.append("")
-            lines.append(latest_heading)
-            for c in latest.courses[:20]:
+            if active_has_grades:
+                lines.append(f"📚 <b>Son Notlu Dönem ({html.escape(active_name)}):</b>")
+            else:
+                lines.append(f"📌 <b>Aktif Dönem ({html.escape(active_name)}):</b>")
+            for c in active_sem.courses[:15]:
+                grade_str = html.escape(c.letter_grade or "Devam Ediyor")
+                title = f"{c.code} - {c.name}" if c.code else c.name
+                lines.append(f"• {html.escape(title)}: <code>{grade_str}</code>")
+            if len(active_sem.courses) > 15:
+                lines.append(f"<i>... ve {len(active_sem.courses) - 15} ders daha.</i>")
+
+        if (
+            last_graded_sem is not None
+            and last_graded_sem is not active_sem
+            and last_graded_sem.courses
+        ):
+            graded_name = re.sub(r"\s+\.", ".", last_graded_sem.name).strip()
+            lines.append("")
+            lines.append(f"📚 <b>Son Notlu Dönem ({html.escape(graded_name)}):</b>")
+            for c in last_graded_sem.courses[:15]:
                 grade_str = html.escape(c.letter_grade or "-")
                 title = f"{c.code} - {c.name}" if c.code else c.name
                 lines.append(f"• {html.escape(title)}: <code>{grade_str}</code>")
-            if len(latest.courses) > 20:
-                lines.append(f"<i>... ve {len(latest.courses) - 20} ders daha.</i>")
+            if len(last_graded_sem.courses) > 15:
+                lines.append(f"<i>... ve {len(last_graded_sem.courses) - 15} ders daha.</i>")
     elif summary.gano is None:
         lines.append("Transkript verisi bulunamadı.")
 

@@ -1,12 +1,12 @@
 # 🎓 Kastamonu Üniversitesi Öğrenci Asistanı (Telegram Botu)
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
-![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-7%2F24%20%C3%9Ccretsiz-2088FF?logo=githubactions&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Otomatik%20%C3%9Ccretsiz-2088FF?logo=githubactions&logoColor=white)
 ![Telegram](https://img.shields.io/badge/Telegram-Anl%C4%B1k%20Bildirim-26A5E4?logo=telegram&logoColor=white)
 ![Lisans](https://img.shields.io/badge/Lisans-GPL--3.0-green)
 
-Kastamonu Üniversitesi öğrencileri için geliştirilmiş, **bilgisayar veya sunucu açık bırakmadan tamamen ücretsiz** bulutta (`GitHub Actions`) çalışan 7/24 Telegram asistanı.  
-Sınav notun açıklandığı anda sınıf ortalaması ve final hedefleriyle Telegram'a bildirir; yanında gün bazlı devamsızlık takibi, transkript/GANO özeti, günlük yemekhane menüsü ve akademik takvim hatırlatmalarını cebine getirir.
+Kastamonu Üniversitesi'nin **tüm fakülte, yüksekokul, meslek yüksekokulu (MYO) ve enstitü** öğrencileri için geliştirilmiş; bilgisayar veya sunucu açık bırakmadan tamamen ücretsiz bulutta (`GitHub Actions`) çalışan otomatik Telegram asistanı.  
+Öğrencinin kayıtlı olduğu **fakülte/bölüm ve aktif sınıfı/dönemi otomatik tanıyarak** sınav notu girildiğinde sınıf ortalaması ve final hedefleriyle Telegram'a bildirir; yanında gün bazlı devamsızlık takibi, aktif dönem transkript/GANO özeti, günlük ders programı, bölüm sınav PDF'leri, yemekhane menüsü ve akademik takvim hatırlatmalarını cebine getirir.
 
 > **Hızlı Geçiş:** [Ne İşe Yarar?](#-ne-i%CC%87%C5%9Fe-yarar) • [Örnek Mesajlar](#-telegramda-nas%C4%B1l-g%C3%B6r%C3%BCn%C3%BCr) • [Telegram Komutları](#-telegram-bot-komutlar%C4%B1-) • [5 Dakikada Kurulum](#-5-dakikada-%C3%BCcretsiz-kurulum-ad%C4%B1m-ad%C4%B1m) • [Tek Tıkla Kullanım](#%EF%B8%8F-i%CC%87stedi%C4%9Fin-zaman-tek-t%C4%B1kla-%C3%A7al%C4%B1%C5%9Ft%C4%B1rma-run-workflow) • [Özelleştirme](#%EF%B8%8F-i%CC%87ste%C4%9Fe-ba%C4%9Fl%C4%B1-%C3%B6zelle%C5%9Ftirmeler-variables) • [Güvenlik](#-g%C3%BCvenlik-ve-gizlilik-%C5%9Fifrem-g%C3%BCvende-mi) • [Sorun Giderme](#-s%C4%B1k-sorulan-sorular-ve-sorun-giderme) • [Yerel / Docker](#-kendi-bilgisayar%C4%B1nda--docker-ile-%C3%A7al%C4%B1%C5%9Ft%C4%B1rma-geli%C5%9Ftiriciler-i%CC%87%C3%A7in)
 
@@ -24,12 +24,12 @@ Sınav notun açıklandığı anda sınıf ortalaması ve final hedefleriyle Tel
   Dönem içi notların geldikçe tahmini dönem sonu ortalamanı (`YANO`), yeni genel ortalamanı (`GANO`), **Onur (`3.00+`) / Yüksek Onur (`3.50+`)** durumunu ve `DC/DD` koşullu geçme riskini (`GANO ≥ 2.00`) hesaplar.
 - 🗓️ **Günlük Ders Programı & Sınav Takvimi Hatırlatıcı**  
   ÜBYS'deki ders programını çekip hafta içi her sabah *"Bugünkü derslerin ve saat/derslikleri"* mesajı atar; sınav haftasında tarih, saat ve salon bilgisiyle **7 / 3 / 1 / 0 gün kala** hatırlatma gönderir.
-- 📢 **Üniversite, OİDB, SKS, Fakülte/MYO ve Ders Materyal/Ödev Takibi**  
-  `oidb.kastamonu.edu.tr`, `sks.kastamonu.edu.tr`, kendi eklediğin fakülte/MYO siteleri, ÜBYS portalı ve ders içindeki yeni PDF/ödev/duyuruları tarayıp yeni bir şey eklendiğinde anında bildirir.
+- 📢 **Üniversite Geneli Otomatik Fakülte/MYO, Bölüm Sınav PDF ve Materyal Takibi**  
+  ÜBYS hesabından okuduğu **fakülte/MYO ve bölüm/sınıf adına göre** kendi biriminin web sayfasını otomatik algılar; `oidb.kastamonu.edu.tr`, `sks.kastamonu.edu.tr`, ÜBYS duyuruları, fakülte/bölüm sınav programı PDF/Excel linkleri ve ders içindeki yeni materyal/ödevleri tarayıp bildirir.
 - 🍽️ **Günlük Yemekhane Menüsü + 🌤️ Kuzeykent Hava Durumu**  
-  Hafta içi her sabah güncel yemek listesi ve kalorileriyle birlikte **Kastamonu / Kuzeykent Kampüsü** hava durumunu ve kıyafet tavsiyesini (ayaz, yağmur, kar, rüzgâr) tek mesajda gönderir.
-- 📅 **Akademik Takvim & 📆 Pazar Akşamı Haftalık Özet**  
-  Önemli akademik tarihler için **7 / 3 / 1 / 0 gün kala** hatırlatma + **Google Takvime Ekle** bağlantısı sunar; her Pazar saat `20:00`'de yaklaşan sınavlar, kritik devamsızlıklar ve takvim özetini tek brifingte toplar.
+  Hafta içi her sabah `08:00`'de güncel yemek listesi ve kalorileriyle birlikte **Kastamonu / Kuzeykent Kampüsü** hava durumunu ve kıyafet tavsiyesini (ayaz, yağmur, kar, rüzgâr) tek mesajda gönderir.
+- 📅 **Akademik Takvim & 📆 Haftalık Öğrenci Özeti**  
+  Önemli akademik tarihler için **7 / 3 / 1 / 0 gün kala** hatırlatma + **Google Takvime Ekle** bağlantısı sunar; hafta sonu yaklaşan sınavlar, kritik devamsızlıklar ve takvim özetini tek brifingte toplar.
 - 💬 **Telegram'dan Komutla Sorgulama (`/yemek`, `/hesapla`, `/devamsizlik`...)**  
   İstediğin zaman bota mesaj atıp menü, hava durumu, final hesabı, devamsızlık veya ders programı isteyebilirsin.
 
@@ -84,7 +84,7 @@ Sınav notun açıklandığı anda sınıf ortalaması ve final hedefleriyle Tel
 
 ## 💬 Telegram Bot Komutları (`/`)
 
-Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(GitHub Actions modunda ücretsiz çalıştığı için ~15 dakikalık döngüde yanıtlanır; bilgisayar/VPS üzerinde `--listen` ile çalıştırırsan saniyesinde yanıt verir)*:
+Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(GitHub Actions modunda zamanlanmış çalışma saatlerinde — hafta içi `08:00` ve her gece `00:00` — yanıtlanır; bilgisayar/VPS üzerinde `--listen` ile çalıştırırsan saniyesinde yanıt verir)*:
 
 | Komut | Açıklama |
 | --- | --- |
@@ -163,7 +163,7 @@ Kendi `Fork`ladığın deponun sayfasına dön:
    - Yeşil **Run workflow** düğmesine bas.
 5. Yaklaşık **1 dakika** içinde Telegram'a ders notların, gün bazlı devamsızlık hakların, transkript özetin, günün yemek listesi ve yaklaşan akademik takvim etkinliklerin gelecektir! 🎉
 
-Bot bundan sonra **Türkiye saatiyle 08:00 – 01:59 arası her 15 dakikada bir** otomatik olarak ÜBYS'yi kontrol eder; ayrıca yemekhane menüsü ve akademik takvim saatlerini takip eder.
+Bot bundan sonra **hafta içi her sabah Türkiye saatiyle `08:00`'de** (yemekhane menüsü, kampüs hava durumu, günün ders programı, akademik takvim ve sabah kontrolü) ve **haftanın her günü gece saat `00:00`'da** (gece not girişi, devamsızlık, materyal ve duyuru kontrolü) otomatik olarak çalışır.
 
 ---
 
@@ -197,14 +197,14 @@ Bot bundan sonra **Türkiye saatiyle 08:00 – 01:59 arası her 15 dakikada bir*
 Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversitesi kurallarıyla otomatik çalıştırır. Değiştirmek istediklerini **Settings → Secrets and variables → Actions → Variables → New repository variable** yolundan ekleyebilirsin:
 
 - **Kendi fakültenin veya MYO'nun duyurularını da eklemek için:**  
-  Varsayılan olarak OİDB, SKS ve ÜBYS duyuruları taranır. Kendi okulunun web sayfasını da eklemek için `ANNOUNCEMENT_URLS` değişkeni ekleyebilirsin:
+  Bot, ÜBYS hesabından okuduğu fakülte/MYO adına göre kendi biriminin sayfasını, OİDB, SKS ve ÜBYS duyurularını **otomatik olarak** tarar. Ekstra farklı bir sayfa eklemek istersen `ANNOUNCEMENT_URLS` değişkeni ekleyebilirsin:
   ```text
-  KMYO|https://kmyo.kastamonu.edu.tr/
+  MMF|https://mmf.kastamonu.edu.tr/
   ```
 - **Bazı derslerin vize/final oranı farklıysa (örn. `%30/%70`):**  
-  Bot dersin oranını ÜBYS ve Eğitim Kataloğu'ndan otomatik okur. Hoca derste farklı bir oran açıkladıysa `COURSE_WEIGHTS` değişkeni ekleyip tüm kaynakların önüne geçirebilirsin:
+  Bot dersin oranını ÜBYS ve Eğitim Kataloğu'ndan otomatik okur (tüm fakülte ve bölümlerle uyumlu). Hoca derste farklı bir oran açıkladıysa `COURSE_WEIGHTS` değişkeni ekleyip tüm kaynakların önüne geçirebilirsin:
   ```text
-  BPBZ201:30/70, BPBZ207:40/60
+  KOD101:30/70, KOD202:40/60
   ```
 - **Fakültene özel akademik takvim görmek için:**  
   `CALENDAR_FACULTY` değişkenine `GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU` veya `TURIZM` (ya da kendi birim adını) yazabilirsin.
@@ -232,19 +232,19 @@ Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversit
 | `SCHEDULE_NOTIFY_HOUR` | `8` | Sabah ders programı bildirimi saati (`0-23`, TR saati) |
 | `EXAM_REMINDER_DAYS` | `7,3,1,0` | Sınavdan kaç gün önce hatırlatma gönderileceği |
 | `ENABLE_MATERIALS` | `true` | Ders içine yüklenen yeni PDF/ödev/duyuruları bildirir |
-| `ENABLE_WEEKLY_BRIEFING` | `true` | Pazar akşamları haftalık toplu öğrenci brifingi gönderir |
-| `WEEKLY_BRIEFING_HOUR` | `20` | Pazar günü haftalık brifing saati (`0-23`, TR saati) |
+| `ENABLE_WEEKLY_BRIEFING` | `true` | Pazar günleri haftalık toplu öğrenci brifingi gönderir |
+| `WEEKLY_BRIEFING_HOUR` | `20` | Pazar haftalık brifing en erken saati (zamanlanmış `00:00` çalışması dahil, TR saati) |
 | `ENABLE_COMMANDS` | `true` | Telegram'dan gelen `/` komutlarını yanıtlar |
 | `ENABLE_CATALOG` | `true` | ÜBYS Eğitim Kataloğu'ndan derslerin gerçek `T+U+L` saatlerini ve değerlendirme oranlarını otomatik çeker (`14` gün Gist önbellekli) |
 | `UBYS_PROGRAM` | *(otomatik)* | Eğitim Kataloğu bölüm eşleşmesi için bölüm adı veya ID sabitlemesi |
 | `MIDTERM_WEIGHT` | `0.40` | Varsayılan vize oranı (`0.40` veya `40`) |
 | `FINAL_WEIGHT` | `0.60` | Varsayılan final oranı (`0.60` veya `60`) |
 | `FINAL_MIN_SCORE` | `0` | Fakülte/bölüm final alt barajı (genel yönetmelik için `0`) |
-| `COURSE_WEIGHTS` | *(boş)* | Ders bazlı özel vize/final oranı (`BPBZ201:30/70,BPBZ207:40/60`) |
+| `COURSE_WEIGHTS` | *(boş)* | Ders bazlı özel vize/final oranı (`KOD101:30/70,KOD202:40/60`) |
 | `SEMESTER_WEEKS` | `14` | Devamsızlık hesabında dönem hafta sayısı |
 | `THEORY_MIN_ATTENDANCE` | `70` | Teorik ders devam zorunluluğu (`%70`) |
 | `PRACTICE_MIN_ATTENDANCE` | `80` | Uygulamalı ders devam zorunluluğu (`%80`) |
-| `COURSE_HOURS` | *(boş)* | Ders bazlı özel haftalık `T+U` saati (`BPBZ201:3+1,BPBZ207:4+0`) |
+| `COURSE_HOURS` | *(boş)* | Ders bazlı özel haftalık `T+U` saati (`KOD101:3+1,KOD202:4+0`) |
 | `CALENDAR_FACULTY` | `GENEL` | Takvim birimi (`GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU`, `TURIZM` — `BOLUM_TIPI` de desteklenir) |
 | `CALENDAR_CATEGORIES` | `STUDENT` | Takvim filtresi (`STUDENT`, `ALL` veya virgüllü kategori listesi) |
 | `CALENDAR_REMINDER_DAYS` | `7,3,1,0` | Etkinlik başlamadan kaç gün önce tek seferlik hatırlatma atılacağı |
@@ -282,7 +282,7 @@ Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversit
   GitHub kuralı gereği bir depoya 60 gün boyunca commit atılmazsa otomatik cron çalışması duraklatılır. **Actions** sekmesine girip **Enable workflow**'a tıklaman veya depoda küçük bir düzenleme yapman 2 aylığına yeniden aktif eder.
 
 - **Bir dersimin vize/final oranı veya teorik/uygulama saati hocanın söylediğiyle uyuşmuyor:**  
-  Hocalar dönem içinde Eğitim Kataloğu'ndan farklı oran/saat uygulayabiliyor. **Settings → Variables** içine `COURSE_WEIGHTS` (örn. `BPBZ201:30/70`) veya `COURSE_HOURS` (örn. `BPBZ201:3+1`) ekleyerek o dersi hemen düzeltebilirsin.
+  Hocalar dönem içinde Eğitim Kataloğu'ndan farklı oran/saat uygulayabiliyor. **Settings → Variables** içine `COURSE_WEIGHTS` (örn. `KOD101:30/70`) veya `COURSE_HOURS` (örn. `KOD101:3+1`) ekleyerek o dersi hemen düzeltebilirsin.
 
 ---
 

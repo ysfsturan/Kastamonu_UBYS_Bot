@@ -17,6 +17,7 @@ from .announcements import (
     fetch_department_exam_links,
     filter_new_announcements,
     infer_faculty_sources,
+    infer_student_class_year,
     is_exam_announcement,
 )
 from .attendance import (
@@ -94,8 +95,14 @@ from .notifier import (
     format_weather_report,
     format_weekly_briefing,
     format_weekly_schedule,
+    select_transcript_semesters,
 )
-from .schedule import exam_reminder_key, find_exam_reminders, get_slots_for_day
+from .schedule import (
+    exam_reminder_key,
+    filter_slots_for_active_courses,
+    find_exam_reminders,
+    get_slots_for_day,
+)
 from .ubys_client import (
     CaptchaRequiredError,
     LoginError,
@@ -252,7 +259,10 @@ def _print_attendance_reports(reports: list[AttendanceReport]) -> None:
         print(f"  {format_attendance_detail_line(report)}")
 
 
-def _print_transcript_summary(summary: TranscriptSummary) -> None:
+def _print_transcript_summary(
+    summary: TranscriptSummary,
+    active_courses: Optional[list[CourseGrade]] = None,
+) -> None:
     print("\n=== Transkript Özeti ===")
     if summary.gano is not None:
         print(f"GANO: {summary.gano:.2f}")
@@ -260,10 +270,18 @@ def _print_transcript_summary(summary: TranscriptSummary) -> None:
         print(f"Toplam Kredi: {summary.total_credit:g}")
     if summary.total_ects is not None:
         print(f"Toplam AKTS: {summary.total_ects:g}")
-    for sem in summary.semesters:
-        gpa_str = f" | YANO: {sem.semester_gpa:.2f}" if sem.semester_gpa is not None else ""
-        cum_str = f" | GANO: {sem.cumulative_gpa:.2f}" if sem.cumulative_gpa is not None else ""
-        print(f"\n• {sem.name}{gpa_str}{cum_str}")
+    _, _, active_idx = select_transcript_semesters(summary, active_courses=active_courses)
+    for idx, sem in enumerate(summary.semesters):
+        tag = ""
+        if idx == active_idx and not any(bool(c.letter_grade) for c in sem.courses):
+            tag = " [Aktif Dönem]"
+        elif active_idx >= 0 and idx > active_idx and not any(bool(c.letter_grade) for c in sem.courses):
+            tag = " [Gelecek Dönem]"
+        gpa_str = f" | YANO: {sem.semester_gpa:.2f}" if sem.semester_gpa is not None and sem.semester_gpa > 0 else ""
+        cum_str = f" | GANO: {sem.cumulative_gpa:.2f}" if sem.cumulative_gpa is not None and sem.cumulative_gpa > 0 else ""
+        print(f"\n• {sem.name}{tag}{gpa_str}{cum_str}")
+        if active_idx >= 0 and idx > active_idx and not any(bool(c.letter_grade) for c in sem.courses):
+            continue
         for c in sem.courses:
             print(f"  - {c.code} {c.name}: {c.letter_grade or '-'}")
 
@@ -592,9 +610,28 @@ def _run_grades_module(
                         pass
 
                 sem_hint = courses[0].semester if courses else None
-                if config.enable_schedule and not _is_date_cache_fresh(prev_swiss.get("schedule_cache"), today_date, 7):
+                active_sem_courses = (
+                    [c for c in courses if c.semester == sem_hint] if courses and sem_hint else list(courses)
+                )
+                if active_sem_courses:
+                    extra_context["active_courses"] = active_sem_courses
+                cached_sched = prev_swiss.get("schedule_cache")
+                sched_cache_ok = _is_date_cache_fresh(cached_sched, today_date, 7)
+                if sched_cache_ok and active_sem_courses and isinstance(cached_sched, dict):
+                    cached_slots = [
+                        ScheduleSlot.from_dict(s)
+                        for s in (cached_sched.get("slots") or [])
+                        if isinstance(s, dict)
+                    ]
+                    if not cached_slots or not filter_slots_for_active_courses(cached_slots, active_sem_courses):
+                        sched_cache_ok = False
+                if config.enable_schedule and not sched_cache_ok:
                     try:
-                        sched_items = client.fetch_weekly_schedule(dump_dir=dump_dir, semester_hint=sem_hint)
+                        sched_items = client.fetch_weekly_schedule(
+                            dump_dir=dump_dir,
+                            semester_hint=sem_hint,
+                            active_courses=active_sem_courses,
+                        )
                         if isinstance(sched_items, list):
                             extra_context["schedule"] = sched_items
                     except Exception as s_exc:
@@ -891,6 +928,7 @@ def _run_announcements_module(
     swiss_state: dict[str, Any],
     home_announcements: Optional[list[Announcement]] = None,
     program_hints: Optional[list[str]] = None,
+    class_year: Optional[int] = None,
 ) -> tuple[bool, list[Announcement]]:
     """Kastamonu Üniversitesi + OİDB + SKS + Fakülte/MYO + Bölüm Sınav PDF + ÜBYS duyurularını tarar."""
     hints = program_hints or [str(x) for x in (swiss_state.get("detected_program_hints") or []) if x]
@@ -900,7 +938,11 @@ def _run_announcements_module(
         cached_sources=swiss_state.get("detected_faculty_sources"),
     )
     try:
-        dept_pdfs = fetch_department_exam_links(extra_sources, hints) if (extra_sources and hints) else []
+        dept_pdfs = (
+            fetch_department_exam_links(extra_sources, hints, class_year=class_year)
+            if (extra_sources and hints)
+            else []
+        )
     except Exception:
         dept_pdfs = []
 
@@ -999,6 +1041,9 @@ def _run_schedule_and_exams_module(
     elif isinstance(swiss_state.get("schedule_cache"), dict):
         raw_slots = swiss_state["schedule_cache"].get("slots") or []
         slots = [ScheduleSlot.from_dict(s) for s in raw_slots if isinstance(s, dict)]
+        active_c = ubys_extras.get("active_courses")
+        if slots and isinstance(active_c, list) and active_c:
+            slots = filter_slots_for_active_courses(slots, active_c)
 
     if config.enable_schedule and slots:
         due_schedule = force_daily or (
@@ -1056,7 +1101,7 @@ def _run_weekly_briefing_module(
 
     is_due = force_daily or (
         today.weekday() == 6
-        and current_dt.hour >= config.weekly_briefing_hour
+        and (current_dt.hour >= config.weekly_briefing_hour or current_dt.hour < 4)
         and swiss_state.get("last_weekly_briefing") != iso_week_str
     )
     if not is_due:
@@ -1252,7 +1297,11 @@ def run_schedule_preview(
             )
             courses = client.fetch_grades(all_semesters=False, fetch_details=False, fetch_materials=False)
             sem_hint = courses[0].semester if courses else None
-            slots = client.fetch_weekly_schedule(dump_dir=dump_dir, semester_hint=sem_hint)
+            slots = client.fetch_weekly_schedule(
+                dump_dir=dump_dir,
+                semester_hint=sem_hint,
+                active_courses=courses,
+            )
     except Exception as exc:
         logger.error("Ders programı çekilemedi: %s", exc)
         return 1
@@ -1275,6 +1324,7 @@ def run_exams_preview(
     today = now_tr().date()
     hints: list[str] = []
     home_anns: list[Announcement] = []
+    active_courses: list[CourseGrade] = []
     try:
         with UBYSClient(base_url=config.ubys_base_url) as client:
             client.login(
@@ -1282,7 +1332,7 @@ def run_exams_preview(
                 password=config.ubys_password,
                 user_group_id=config.ubys_user_group_id,
             )
-            client.fetch_grades(all_semesters=False, fetch_details=False, fetch_materials=False)
+            active_courses = client.fetch_grades(all_semesters=False, fetch_details=False, fetch_materials=False)
             hints = client.student_program_hints
             home_anns = client.home_announcements
             exams = client.fetch_exam_schedule(dump_dir=dump_dir)
@@ -1291,7 +1341,12 @@ def run_exams_preview(
         return 1
 
     unit_sources = _merge_unit_sources(config, program_hints=hints)
-    dept_pdfs = fetch_department_exam_links(unit_sources, hints) if (unit_sources and hints) else []
+    class_yr = infer_student_class_year(active_courses)
+    dept_pdfs = (
+        fetch_department_exam_links(unit_sources, hints, class_year=class_yr)
+        if (unit_sources and hints)
+        else []
+    )
     all_anns = fetch_all_announcements(extra_sources=unit_sources) if config.enable_announcements else []
     exam_anns: list[Announcement] = []
     seen_ids: set[str] = set()
@@ -1522,6 +1577,7 @@ def run_transcript_preview(
 ) -> int:
     """ÜBYS transkript ve GANO özetini çekip ekrana (ve isteğe bağlı Telegram'a) yazdırır."""
     dump_dir = Path("debug_html") if dump_html else None
+    active_courses: list[CourseGrade] = []
     try:
         with UBYSClient(base_url=config.ubys_base_url) as client:
             client.login(
@@ -1529,14 +1585,25 @@ def run_transcript_preview(
                 password=config.ubys_password,
                 user_group_id=config.ubys_user_group_id,
             )
+            try:
+                active_courses = client.fetch_grades(
+                    all_semesters=False,
+                    fetch_details=False,
+                    fetch_materials=False,
+                )
+            except Exception:
+                active_courses = []
             summary = client.fetch_transcript(dump_dir=dump_dir)
     except Exception as exc:
         logger.error("Transkript çekilemedi: %s", exc)
         return 1
 
-    _print_transcript_summary(summary)
+    _print_transcript_summary(summary, active_courses=active_courses)
     if notify_test:
-        if not _send_telegram_safe(config, format_transcript_summary(summary, config.ubys_base_url)):
+        if not _send_telegram_safe(
+            config,
+            format_transcript_summary(summary, config.ubys_base_url, active_courses=active_courses),
+        ):
             return 1
         logger.info("Transkript özeti Telegram'a gönderildi.")
     return 0
@@ -1626,6 +1693,8 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
     program_hints: list[str] = []
     exams: list[ExamScheduleItem] = []
     module_statuses: list[str] = []
+    courses: list[CourseGrade] = []
+    active_sem_courses: list[CourseGrade] = []
 
     if config.enable_grades:
         transcript_summary: Optional[TranscriptSummary] = None
@@ -1651,6 +1720,10 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                 program_hints = client.student_program_hints
                 home_anns = client.home_announcements
                 home_routes = client.home_routes
+                sem_hint = courses[0].semester if courses else None
+                active_sem_courses = (
+                    [c for c in courses if c.semester == sem_hint] if courses and sem_hint else list(courses)
+                )
                 if config.enable_transcript:
                     try:
                         transcript_summary = client.fetch_transcript(dump_dir=dump_dir)
@@ -1658,8 +1731,11 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                         logger.warning("Transkript alınamadı: %s", t_exc)
                 if config.enable_schedule:
                     try:
-                        sem_hint = courses[0].semester if courses else None
-                        slots = client.fetch_weekly_schedule(dump_dir=dump_dir, semester_hint=sem_hint)
+                        slots = client.fetch_weekly_schedule(
+                            dump_dir=dump_dir,
+                            semester_hint=sem_hint,
+                            active_courses=active_sem_courses,
+                        )
                     except Exception:
                         pass
                 if config.enable_exam_schedule:
@@ -1718,12 +1794,17 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                     module_statuses.append("• 📊 <b>YANO Projeksiyonu:</b> ℹ️ Final/harf notu girilince hesaplanır")
 
             if transcript_summary is not None:
-                _print_transcript_summary(transcript_summary)
+                _print_transcript_summary(transcript_summary, active_courses=active_sem_courses)
                 gano_note = f"GANO {transcript_summary.gano:.2f}" if transcript_summary.gano is not None else "Hazır"
                 module_statuses.append(f"• 🎓 <b>Transkript:</b> ✅ {gano_note}")
                 if notify_test:
                     if not _send_telegram_safe(
-                        config, format_transcript_summary(transcript_summary, config.ubys_base_url)
+                        config,
+                        format_transcript_summary(
+                            transcript_summary,
+                            config.ubys_base_url,
+                            active_courses=active_sem_courses,
+                        ),
                     ):
                         overall_ok = False
 
@@ -1784,7 +1865,11 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
     dept_pdfs: list[Announcement] = []
     if (config.enable_announcements or config.enable_exam_schedule) and unit_sources and program_hints:
         try:
-            dept_pdfs = fetch_department_exam_links(unit_sources, program_hints)
+            dept_pdfs = fetch_department_exam_links(
+                unit_sources,
+                program_hints,
+                class_year=infer_student_class_year(active_sem_courses),
+            )
         except Exception:
             dept_pdfs = []
 
@@ -1992,6 +2077,7 @@ def run_once(
             swiss_state,
             home_announcements=ubys_extras.get("home_announcements"),
             program_hints=ubys_extras.get("program_hints"),
+            class_year=infer_student_class_year(ubys_extras.get("active_courses") or courses),
         )
         if ann_dirty:
             working_state["swiss_tool"] = swiss_state

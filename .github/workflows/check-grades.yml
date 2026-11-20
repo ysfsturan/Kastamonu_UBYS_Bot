@@ -2,10 +2,10 @@ name: Kastamonu ÜBYS Swiss Bot
 
 on:
   schedule:
-    # UTC 05:00 - 22:59 arası her 15 dakikada bir (Türkiye saatiyle 08:00 - 01:59)
-    # Public depolarda GitHub Actions dakikaları ücretsiz ve sınırsızdır.
-    # 7/24 kontrol için: '*/15 * * * *'
-    - cron: '*/15 5-22 * * *'
+    # Hafta içi her sabah Türkiye saatiyle 08:00 (UTC 05:00, Pazartesi-Cuma)
+    - cron: '0 5 * * 1-5'
+    # Haftanın her günü gece Türkiye saatiyle 00:00 (UTC 21:00) - not girişi kontrolü
+    - cron: '0 21 * * *'
 
   workflow_dispatch:
     inputs:

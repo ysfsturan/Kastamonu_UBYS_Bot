@@ -10,6 +10,7 @@ from .announcements import (
     fetch_all_announcements,
     fetch_department_exam_links,
     infer_faculty_sources,
+    infer_student_class_year,
     is_exam_announcement,
 )
 from .attendance import evaluate_all_attendance
@@ -43,7 +44,7 @@ from .notifier import (
     format_weekly_briefing,
     format_weekly_schedule,
 )
-from .schedule import get_slots_for_day
+from .schedule import exam_reminder_key, filter_slots_for_active_courses, get_slots_for_day
 from .ubys_client import UBYSClient
 from .weather import fetch_weather_forecast
 
@@ -188,12 +189,20 @@ def _get_or_fetch_courses(config: Config, context: dict[str, Any]) -> list[Cours
 
 def _get_or_fetch_schedule(config: Config, context: dict[str, Any]) -> list[ScheduleSlot]:
     existing = context.get("schedule")
+    active_courses = context.get("courses") if isinstance(context.get("courses"), list) else None
     if isinstance(existing, list):
-        return existing
+        if active_courses:
+            filtered = filter_slots_for_active_courses(existing, active_courses)
+            if filtered:
+                return filtered
+        elif existing:
+            return existing
     swiss_state = context.get("swiss_state") or {}
     cache = swiss_state.get("schedule_cache")
     if isinstance(cache, dict) and isinstance(cache.get("slots"), list):
         slots = [ScheduleSlot.from_dict(s) for s in cache["slots"] if isinstance(s, dict)]
+        if slots and active_courses:
+            slots = filter_slots_for_active_courses(slots, active_courses)
         if slots:
             context["schedule"] = slots
             return slots
@@ -203,7 +212,11 @@ def _get_or_fetch_schedule(config: Config, context: dict[str, Any]) -> list[Sche
             password=config.ubys_password,
             user_group_id=config.ubys_user_group_id,
         )
-        slots = client.fetch_weekly_schedule()
+        if active_courses is None:
+            active_courses = client.fetch_grades(all_semesters=False, fetch_details=False, fetch_materials=False)
+            context["courses"] = active_courses
+        sem_hint = active_courses[0].semester if active_courses else None
+        slots = client.fetch_weekly_schedule(semester_hint=sem_hint, active_courses=active_courses)
     context["schedule"] = slots
     return slots
 
@@ -350,14 +363,26 @@ def handle_command(
             return format_attendance_report(reports, config.ubys_base_url)
 
         if command == "transkript":
+            active_courses = context.get("courses") if isinstance(context.get("courses"), list) else None
             with UBYSClient(base_url=config.ubys_base_url) as client:
                 client.login(
                     username=config.ubys_username,
                     password=config.ubys_password,
                     user_group_id=config.ubys_user_group_id,
                 )
+                if active_courses is None:
+                    active_courses = client.fetch_grades(
+                        all_semesters=False,
+                        fetch_details=False,
+                        fetch_materials=False,
+                    )
+                    context["courses"] = active_courses
                 summary = client.fetch_transcript()
-            return format_transcript_summary(summary, config.ubys_base_url)
+            return format_transcript_summary(
+                summary,
+                config.ubys_base_url,
+                active_courses=active_courses,
+            )
 
         if command == "gano":
             courses = _get_or_fetch_courses(config, context)
@@ -396,7 +421,13 @@ def handle_command(
                     if u and u.rstrip("/").lower() not in seen_u:
                         seen_u.add(u.rstrip("/").lower())
                         unit_sources.append((str(raw[0]), u))
-            dept_pdfs = fetch_department_exam_links(unit_sources, p_hints) if (unit_sources and p_hints) else []
+            active_c = context.get("courses") if isinstance(context.get("courses"), list) else []
+            class_yr = infer_student_class_year(active_c)
+            dept_pdfs = (
+                fetch_department_exam_links(unit_sources, p_hints, class_year=class_yr)
+                if (unit_sources and p_hints)
+                else []
+            )
             cached_anns = context.get("announcements")
             if not isinstance(cached_anns, list):
                 cached_anns = fetch_all_announcements(extra_sources=unit_sources) if unit_sources else []
