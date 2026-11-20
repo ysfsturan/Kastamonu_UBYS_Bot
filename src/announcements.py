@@ -243,3 +243,216 @@ def filter_new_announcements(
                 continue
         new_items.append(item)
     return new_items
+
+
+# (anahtar kelimeler (_fold_tr), kısa kaynak etiketi, duyuru/birim URL'si)
+KASTAMONU_UNIT_SITES: list[tuple[tuple[str, ...], str, str]] = [
+    (("kastamonu meslek yuksekokulu", "kmyo"), "KMYO", "https://kmyo.kastamonu.edu.tr/"),
+    (("muhendislik ve mimarlik", "muhendislik fakultesi"), "MMF", "https://mmf.kastamonu.edu.tr/"),
+    (("iktisadi ve idari", "iibf"), "İİBF", "https://iibf.kastamonu.edu.tr/"),
+    (("fen fakultesi",), "Fen Fak.", "https://fen.kastamonu.edu.tr/"),
+    (("insan ve toplum bilimleri", "itbf", "edebiyat fakultesi"), "İTBF", "https://itbf.kastamonu.edu.tr/"),
+    (("egitim fakultesi",), "Eğitim Fak.", "https://egitim.kastamonu.edu.tr/"),
+    (("orman fakultesi",), "Orman Fak.", "https://orman.kastamonu.edu.tr/"),
+    (("saglik bilimleri fakultesi",), "SBF", "https://sbf.kastamonu.edu.tr/"),
+    (("tip fakultesi",), "Tıp Fak.", "https://tip.kastamonu.edu.tr/"),
+    (("veteriner fakultesi",), "Veteriner", "https://veteriner.kastamonu.edu.tr/"),
+    (("iletisim fakultesi",), "İletişim", "https://iletisim.kastamonu.edu.tr/"),
+    (("ilahiyat fakultesi",), "İlahiyat", "https://ilahiyat.kastamonu.edu.tr/"),
+    (("turizm fakultesi",), "Turizm", "https://turizm.kastamonu.edu.tr/"),
+    (("spor bilimleri",), "Spor Bil.", "https://sporbilimleri.kastamonu.edu.tr/"),
+    (("guzel sanatlar",), "GSTF", "https://gstf.kastamonu.edu.tr/"),
+    (("su urunleri",), "Su Ürünleri", "https://suurunleri.kastamonu.edu.tr/"),
+    (("sivil havacilik", "shyo"), "SHYO", "https://shyo.kastamonu.edu.tr/"),
+    (("yabanci diller yuksekokulu", "ydyo"), "YDYO", "https://ydyo.kastamonu.edu.tr/"),
+    (("arac rafet vergili", "arac meslek"), "Araç MYO", "https://aracmyo.kastamonu.edu.tr/"),
+    (("taskopru meslek",), "Taşköprü MYO", "https://taskoprumyo.kastamonu.edu.tr/"),
+    (("tosya meslek",), "Tosya MYO", "https://tosyamyo.kastamonu.edu.tr/"),
+    (("inebolu meslek",), "İnebolu MYO", "https://inebolumyo.kastamonu.edu.tr/"),
+    (("devrekani",), "Devrekani MYO", "https://devrekanimyo.kastamonu.edu.tr/"),
+    (("cide rifat ilgaz", "cide meslek"), "Cide MYO", "https://cidemyo.kastamonu.edu.tr/"),
+    (("abana sabahat", "abana meslek"), "Abana MYO", "https://abanamyo.kastamonu.edu.tr/"),
+    (("bozkurt meslek",), "Bozkurt MYO", "https://bozkurtmyo.kastamonu.edu.tr/"),
+    (("catalzeytin",), "Çatalzeytin MYO", "https://catalzeytinmyo.kastamonu.edu.tr/"),
+    (("daday nafi", "daday meslek"), "Daday MYO", "https://dadaymyo.kastamonu.edu.tr/"),
+    (("ihsangazi",), "İhsangazi MYO", "https://ihsangazimyo.kastamonu.edu.tr/"),
+    (("kure meslek",), "Küre MYO", "https://kuremyo.kastamonu.edu.tr/"),
+]
+
+_EXAM_ANNOUNCE_KWS = (
+    "sinav program",
+    "sinav takvim",
+    "vize sinav",
+    "vize takvim",
+    "ara sinav",
+    "final sinav",
+    "final takvim",
+    "butunleme",
+    "mazeret sinav",
+    "sinav yerleri",
+    "merkezi sinav",
+)
+
+
+def infer_faculty_sources(
+    program_hints: list[str],
+    extra_text: str = "",
+) -> list[tuple[str, str]]:
+    """Öğrencinin fakülte/MYO adından Kastamonu Üniversitesi birim duyuru adresini otomatik türetir."""
+    haystack = _fold_tr(" ".join([*program_hints, extra_text]))
+    if not haystack:
+        return []
+    matched: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for keywords, label, url in KASTAMONU_UNIT_SITES:
+        if any(kw in haystack for kw in keywords):
+            canon = _canonicalize_url(url).rstrip("/")
+            if canon not in seen_urls:
+                seen_urls.add(canon)
+                matched.append((label, url))
+    return matched
+
+
+def is_exam_announcement(ann: Announcement) -> bool:
+    """Duyurunun sınav programı / sınav takvimi / sınav yeri bildirimi olup olmadığını kontrol eder."""
+    haystack = _fold_tr(f"{ann.source} {ann.title} {ann.summary}")
+    return any(kw in haystack for kw in _EXAM_ANNOUNCE_KWS)
+
+
+def parse_department_program_url(
+    unit_html: str,
+    unit_base_url: str,
+    program_hints: list[str],
+) -> Optional[str]:
+    """Birim ana sayfası menüsünden öğrencinin bölüm/program sayfası linkini bulur."""
+    soup = BeautifulSoup(unit_html or "", "html.parser")
+    folded_hints = [_fold_tr(h) for h in program_hints if _fold_tr(h)]
+    if not folded_hints:
+        return None
+
+    best_score = 0
+    best_url: Optional[str] = None
+    for a in soup.find_all("a", href=True):
+        href = str(a["href"]).strip()
+        if not href or href == "#" or href.startswith("javascript:") or href.startswith("mailto:"):
+            continue
+        link_txt = _fold_tr(a.get_text(" ", strip=True))
+        if not link_txt or len(link_txt) < 4:
+            continue
+        # "Bölüm / Program Adı" içeren tam eşleşme en yüksek puanı alır
+        for hint in folded_hints:
+            if link_txt in hint or any(part.strip() == link_txt for part in re.split(r"[-/|]", hint)):
+                score = len(link_txt) + (50 if "/boeluemler/" in href.lower() or "/bolum" in href.lower() else 0)
+                if score > best_score:
+                    best_score = score
+                    best_url = urljoin(unit_base_url, href)
+    return best_url
+
+
+def parse_department_exam_pdfs(
+    dept_html: str,
+    dept_base_url: str,
+    source_label: str,
+    max_items: int = 2,
+) -> list[Announcement]:
+    """Bölüm sayfasındaki 'Sınav Programları' sekmesinden aktif dönem PDF/Excel takvimlerini çıkarır."""
+    soup = BeautifulSoup(dept_html or "", "html.parser")
+    target_pane_ids: list[str] = []
+    for tab_a in soup.find_all("a", href=True):
+        href = str(tab_a["href"]).strip()
+        txt = _fold_tr(tab_a.get_text(" ", strip=True))
+        if href.startswith("#") and len(href) > 2 and ("sinav program" in txt or "sinav takvim" in txt):
+            target_pane_ids.append(href[1:])
+
+    containers = []
+    for pid in target_pane_ids:
+        pane = soup.find(id=pid)
+        if pane is not None:
+            containers.append(pane)
+    if not containers:
+        return []
+
+    results: list[Announcement] = []
+    seen_urls: set[str] = set()
+    for pane in containers:
+        # "Önceki Dönem..." başlığından sonraki arşiv bağlantılarını atla
+        for tag in pane.find_all(["p", "li", "h1", "h2", "h3", "h4", "strong", "span", "a"], recursive=True):
+            if tag.name != "a" and not tag.find("a"):
+                txt_fold = _fold_tr(tag.get_text(" ", strip=True))
+                if "onceki donem" in txt_fold or "arsiv" in txt_fold:
+                    break
+            if tag.name != "a" or not tag.get("href"):
+                continue
+            href = str(tag["href"]).strip()
+            low_h = href.lower()
+            if not any(low_h.split("?")[0].endswith(ext) for ext in (".pdf", ".xlsx", ".xls", ".docx")):
+                continue
+            abs_url = urljoin(dept_base_url, href)
+            canon = _canonicalize_url(abs_url)
+            if canon in seen_urls:
+                continue
+
+            # Önceki kardeş metinden başlığı çıkar ("... Takvimi için TIKLAYINIZ")
+            parent_blk = tag.find_parent(["p", "li", "tr"]) or tag.parent
+            blk_text = _clean_text(parent_blk.get_text(" ", strip=True)) if parent_blk else ""
+            # Bir paragraf birden çok yıl içeriyorsa sadece ilk link öncesi veya başlık parçasını al
+            link_txt = _clean_text(tag.get_text(" ", strip=True))
+            if link_txt and link_txt in blk_text:
+                before = blk_text.split(link_txt, 1)[0]
+            else:
+                before = blk_text
+            cleaned_title = re.sub(r"\s+i[çc]in\s*$", "", before.strip(" .:;-"), flags=re.IGNORECASE).strip()
+            if len(cleaned_title) < 8:
+                cleaned_title = abs_url.rsplit("/", 1)[-1]
+            # Önceki yıllara ait çoklu blok ise durdur
+            if re.search(r"\b20(?:20|21|22|23|24)\b", _fold_tr(cleaned_title)):
+                continue
+
+            seen_urls.add(canon)
+            results.append(
+                Announcement(
+                    announcement_id=make_announcement_id(f"{source_label} Sınav PDF", abs_url, cleaned_title),
+                    source=f"{source_label} Sınav PDF",
+                    title=cleaned_title[:180],
+                    url=abs_url,
+                )
+            )
+            if len(results) >= max_items:
+                return results
+    return results
+
+
+def fetch_department_exam_links(
+    unit_sources: list[tuple[str, str]],
+    program_hints: list[str],
+    timeout: float = 20.0,
+) -> list[Announcement]:
+    """Birim sitesi + bölüm sayfası üzerinden aktif sınav programı PDF bağlantılarını toplar."""
+    if not unit_sources or not program_hints:
+        return []
+
+    found: list[Announcement] = []
+    seen_ids: set[str] = set()
+    with httpx.Client(
+        headers={"User-Agent": _USER_AGENT, "Accept-Language": "tr-TR,tr;q=0.9"},
+        follow_redirects=True,
+        timeout=timeout,
+    ) as client:
+        for label, unit_url in unit_sources:
+            try:
+                u_resp = client.get(unit_url)
+                if u_resp.status_code >= 400:
+                    continue
+                dept_url = parse_department_program_url(u_resp.text, str(u_resp.url), program_hints)
+                if not dept_url:
+                    continue
+                d_resp = client.get(dept_url)
+                if d_resp.status_code >= 400:
+                    continue
+                for pdf_ann in parse_department_exam_pdfs(d_resp.text, str(d_resp.url), label):
+                    if pdf_ann.announcement_id not in seen_ids:
+                        seen_ids.add(pdf_ann.announcement_id)
+                        found.append(pdf_ann)
+            except Exception as exc:
+                logger.debug("Bölüm sınav PDF'leri alınamadı (%s): %s", label, exc)
+    return found

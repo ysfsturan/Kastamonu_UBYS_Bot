@@ -1086,25 +1086,41 @@ def format_weekly_schedule(slots: list[ScheduleSlot], base_url: str) -> str:
     return "\n".join(lines)
 
 
-def format_exam_schedule(exams: list[ExamScheduleItem], today: date, base_url: str) -> str:
-    """Yaklaşan ve tüm sınav programını Telegram HTML mesajına çevirir."""
+def format_exam_schedule(
+    exams: list[ExamScheduleItem],
+    today: date,
+    base_url: str,
+    exam_announcements: Optional[list[Announcement]] = None,
+) -> str:
+    """Yaklaşan sınav programını ve bölüm/fakülte sınav duyuru PDF'lerini Telegram HTML mesajına çevirir."""
     lines = ["📝 <b>ÜBYS Sınav Takvimi</b>", ""]
-    if not exams:
+    if not exams and not exam_announcements:
         lines.append("ÜBYS üzerinde yayınlanmış sınav takvimi bulunamadı.")
     else:
-        upcoming = [e for e in exams if e.exam_date >= today]
-        to_show = upcoming if upcoming else exams
-        for ex in to_show[:25]:
-            days_left = (ex.exam_date - today).days
-            day_tag = "BUGÜN" if days_left == 0 else (f"{days_left} gün kaldı" if days_left > 0 else "Geçti")
-            title = f"{ex.course_code} - {ex.course_name}" if ex.course_code else ex.course_name
-            time_part = f" | {ex.exam_time}" if ex.exam_time else ""
-            room_part = f" | Salon: {ex.classroom}" if ex.classroom else ""
-            seat_part = f" (Sıra: {ex.seat})" if ex.seat else ""
-            lines.append(f"• <b>{html.escape(title)}</b> — <i>{html.escape(ex.exam_type)}</i>")
-            lines.append(
-                f"  📅 {html.escape(format_tr_date(ex.exam_date, with_weekday=True))}{html.escape(time_part + room_part + seat_part)} (<b>{html.escape(day_tag)}</b>)"
-            )
+        if exams:
+            upcoming = [e for e in exams if e.exam_date >= today]
+            to_show = upcoming if upcoming else exams
+            for ex in to_show[:25]:
+                days_left = (ex.exam_date - today).days
+                day_tag = "BUGÜN" if days_left == 0 else (f"{days_left} gün kaldı" if days_left > 0 else "Geçti")
+                title = f"{ex.course_code} - {ex.course_name}" if ex.course_code else ex.course_name
+                time_part = f" | {ex.exam_time}" if ex.exam_time else ""
+                room_part = f" | Salon: {ex.classroom}" if ex.classroom else ""
+                seat_part = f" (Sıra: {ex.seat})" if ex.seat else ""
+                lines.append(f"• <b>{html.escape(title)}</b> — <i>{html.escape(ex.exam_type)}</i>")
+                lines.append(
+                    f"  📅 {html.escape(format_tr_date(ex.exam_date, with_weekday=True))}{html.escape(time_part + room_part + seat_part)} (<b>{html.escape(day_tag)}</b>)"
+                )
+        if exam_announcements:
+            if exams:
+                lines.append("")
+            lines.append("📢 <b>Bölüm / Fakülte Sınav Programı &amp; PDF'ler:</b>")
+            for ann in exam_announcements[:6]:
+                d_tag = f" ({html.escape(ann.published_date)})" if ann.published_date else ""
+                lines.append(
+                    f'• <b>[{html.escape(ann.source)}]</b>{d_tag} '
+                    f'<a href="{html.escape(ann.url, quote=True)}">{html.escape(ann.title)}</a>'
+                )
     lines.append("")
     lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
     return "\n".join(lines)

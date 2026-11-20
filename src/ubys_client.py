@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urljoin
@@ -36,6 +38,7 @@ from .ubys_parser import (
     parse_sap_id,
     parse_schedule_url,
     parse_student_gano,
+    parse_student_info_json,
     parse_student_program_hints,
     parse_transcript,
     parse_transcript_url,
@@ -100,6 +103,9 @@ class UBYSClient:
         self._home_announcements: list[Announcement] = []
         self._home_routes: list[str] = []
         self._program_hints: list[str] = []
+        self._student_info: Optional[dict[str, Any]] = None
+        self._ajax_csrf: Optional[str] = None
+        self._last_schedule_html: Optional[str] = None
 
     @property
     def last_home_gano(self) -> Optional[float]:
@@ -297,6 +303,8 @@ class UBYSClient:
         self._home_announcements = parse_ubys_home_announcements(home_resp.text, self.base_url)
         self._home_routes = discover_home_routes(home_resp.text)
         self._program_hints = parse_student_program_hints(home_resp.text)
+        self._student_info = parse_student_info_json(home_resp.text)
+        self._ajax_csrf = extract_ajax_csrf_token(home_resp.text)
         return home_resp.text
 
     def fetch_grades(
@@ -516,12 +524,112 @@ class UBYSClient:
                 unique.append(u)
         return unique
 
-    def fetch_weekly_schedule(self, dump_dir: Optional[Path] = None) -> list[ScheduleSlot]:
-        """Öğrencinin haftalık ders programını çeker; bulunamazsa boş liste döner."""
+    @staticmethod
+    def _infer_schedule_year_semesters(
+        program: dict[str, Any],
+        semester_hint: Optional[str] = None,
+    ) -> list[tuple[int, str]]:
+        candidates: list[tuple[int, str]] = []
+
+        if semester_hint:
+            yr_m = re.search(r"(\d{4})", semester_hint)
+            low_hint = semester_hint.replace("İ", "i").replace("I", "ı").lower()
+            sem_code: Optional[str] = None
+            if "güz" in low_hint or "guz" in low_hint:
+                sem_code = "1"
+            elif "bahar" in low_hint:
+                sem_code = "2"
+            elif "yaz" in low_hint:
+                sem_code = "3"
+            if yr_m and sem_code:
+                y_val = int(yr_m.group(1))
+                candidates.append((y_val, sem_code))
+                if sem_code == "2":
+                    candidates.append((y_val - 1, sem_code))
+
+        today = date.today()
+        if today.month >= 9:
+            candidates.append((today.year, "1"))
+        elif today.month == 1:
+            candidates.append((today.year - 1, "1"))
+        elif 2 <= today.month <= 6:
+            candidates.append((today.year - 1, "2"))
+            candidates.append((today.year, "2"))
+        else:
+            candidates.append((today.year - 1, "3"))
+
+        rec_year = _safe_int(program.get("RecordYear"))
+        rec_sem = str(program.get("RecordSemester") or "").strip()
+        if rec_year is not None and rec_sem:
+            candidates.append((rec_year + 1, rec_sem))
+            candidates.append((rec_year, rec_sem))
+
+        seen: set[tuple[int, str]] = set()
+        unique: list[tuple[int, str]] = []
+        for pair in candidates:
+            if pair not in seen:
+                seen.add(pair)
+                unique.append(pair)
+        return unique
+
+    def fetch_weekly_schedule(
+        self,
+        dump_dir: Optional[Path] = None,
+        semester_hint: Optional[str] = None,
+    ) -> list[ScheduleSlot]:
+        """Öğrencinin haftalık ders programını Netix GetWeeklySchedule POST ve GET rotalarından çeker."""
         if not self._logged_in:
             raise SessionExpiredError("Önce login() çağrılmalıdır.")
-        if self._schedule_url is None and self._sap_id is None:
+        if self._student_info is None and self._sap_id is None:
             self._fetch_home_metadata(dump_dir=dump_dir)
+
+        programs = (self._student_info or {}).get("Programs") or []
+        if isinstance(programs, list) and programs and isinstance(programs[0], dict):
+            program = programs[0]
+            student_id = program.get("StudentId")
+            if student_id is not None:
+                post_url = f"{self.base_url}/AIS/Student/Home/GetWeeklySchedule"
+                post_headers = {
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": f"{self.base_url}/AIS/Student/Home/Index",
+                    "Origin": self.base_url,
+                }
+                if self._ajax_csrf:
+                    post_headers["__RequestVerificationToken"] = self._ajax_csrf
+
+                for yr, sem_id in self._infer_schedule_year_semesters(program, semester_hint=semester_hint):
+                    payload = {
+                        "co": {
+                            "InstructorId": None,
+                            "SemesterId": str(sem_id),
+                            "StudentId": student_id,
+                            "WeeklyScheduleType": 1,
+                            "WorkcenterId": None,
+                            "Year": int(yr),
+                            "GetExamPlans": True,
+                            "IsAnnual": False,
+                        },
+                        "reportViewType": 0,
+                        "isPartial": True,
+                    }
+                    try:
+                        resp = self._request("POST", post_url, json=payload, headers=post_headers)
+                        if is_login_page(resp.text, str(resp.url)):
+                            raise SessionExpiredError("Ders programı alınırken oturum düştü.")
+                        if resp.status_code >= 400:
+                            continue
+                        if dump_dir is not None:
+                            dump_dir.mkdir(parents=True, exist_ok=True)
+                            (dump_dir / "weekly_schedule.html").write_text(resp.text, encoding="utf-8")
+                        self._last_schedule_html = resp.text
+                        slots = parse_weekly_schedule(resp.text)
+                        if slots:
+                            return slots
+                    except SessionExpiredError:
+                        raise
+                    except Exception as exc:
+                        logger.debug("GetWeeklySchedule POST denemesi başarısız (%s-%s): %s", yr, sem_id, exc)
 
         urls = self._build_candidate_urls(
             self._schedule_url,
@@ -545,6 +653,7 @@ class UBYSClient:
                 if dump_dir is not None:
                     dump_dir.mkdir(parents=True, exist_ok=True)
                     (dump_dir / "weekly_schedule.html").write_text(resp.text, encoding="utf-8")
+                self._last_schedule_html = resp.text
                 slots = parse_weekly_schedule(resp.text)
                 if slots:
                     return slots
@@ -560,6 +669,11 @@ class UBYSClient:
             raise SessionExpiredError("Önce login() çağrılmalıdır.")
         if self._exam_schedule_url is None and self._sap_id is None:
             self._fetch_home_metadata(dump_dir=dump_dir)
+
+        if self._last_schedule_html:
+            inline_exams = parse_exam_schedule(self._last_schedule_html)
+            if inline_exams:
+                return inline_exams
 
         urls = self._build_candidate_urls(
             self._exam_schedule_url,

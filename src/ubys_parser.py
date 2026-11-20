@@ -965,7 +965,7 @@ def parse_attendance_partial(html: str) -> dict[str, Any]:
 def parse_student_info_json(home_html: str) -> Optional[dict[str, Any]]:
     """/AIS/Student/Home/Index sayfasındaki Base64 kodlu StudentInfo JSON nesnesini çözer."""
     match = re.search(
-        r"""StudentInfo\s*=\s*JSON\.parse\(\s*Base64\.decode\(\s*["']([^"']+)["']\s*\)\s*\)""",
+        r"""_?[Ss]tudentInfo\s*=\s*JSON\.parse\(\s*Base64\.decode\(\s*["']([^"']+)["']\s*\)\s*\)""",
         home_html,
     )
     if not match:

@@ -12,7 +12,13 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .announcements import fetch_all_announcements, filter_new_announcements
+from .announcements import (
+    fetch_all_announcements,
+    fetch_department_exam_links,
+    filter_new_announcements,
+    infer_faculty_sources,
+    is_exam_announcement,
+)
 from .attendance import (
     build_attendance_snapshot,
     diff_attendance,
@@ -569,6 +575,9 @@ def _run_grades_module(
             logger.info("Toplam %d ders çekildi.", len(courses))
 
             if extra_context is not None:
+                if isinstance(program_hints, list) and program_hints:
+                    extra_context["program_hints"] = list(program_hints)
+
                 home_ann = client.home_announcements
                 if isinstance(home_ann, list):
                     extra_context["home_announcements"] = home_ann
@@ -582,9 +591,10 @@ def _run_grades_module(
                     except Exception:
                         pass
 
+                sem_hint = courses[0].semester if courses else None
                 if config.enable_schedule and not _is_date_cache_fresh(prev_swiss.get("schedule_cache"), today_date, 7):
                     try:
-                        sched_items = client.fetch_weekly_schedule(dump_dir=dump_dir)
+                        sched_items = client.fetch_weekly_schedule(dump_dir=dump_dir, semester_hint=sem_hint)
                         if isinstance(sched_items, list):
                             extra_context["schedule"] = sched_items
                     except Exception as s_exc:
@@ -850,23 +860,62 @@ def _run_calendar_module(
     return (not delivery_failed), True
 
 
+def _merge_unit_sources(
+    config: Config,
+    program_hints: Optional[list[str]] = None,
+    cached_sources: Optional[list[Any]] = None,
+) -> list[tuple[str, str]]:
+    merged: list[tuple[str, str]] = list(config.announcement_urls)
+    seen_urls = {u.rstrip("/").lower() for _, u in merged}
+    inferred = infer_faculty_sources(
+        program_hints or [],
+        extra_text=f"{config.ubys_program or ''} {config.calendar_faculty or ''}",
+    )
+    for label, url in inferred:
+        low_u = url.rstrip("/").lower()
+        if low_u not in seen_urls:
+            seen_urls.add(low_u)
+            merged.append((label, url))
+    for raw in cached_sources or []:
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            label, url = str(raw[0]).strip(), str(raw[1]).strip()
+            low_u = url.rstrip("/").lower()
+            if url and low_u not in seen_urls:
+                seen_urls.add(low_u)
+                merged.append((label or "Birim", url))
+    return merged
+
+
 def _run_announcements_module(
     config: Config,
     swiss_state: dict[str, Any],
     home_announcements: Optional[list[Announcement]] = None,
+    program_hints: Optional[list[str]] = None,
 ) -> tuple[bool, list[Announcement]]:
-    """Kastamonu Üniversitesi + OİDB + SKS + ÜBYS duyurularını tarar -> (state_dirty, çekilenler)."""
+    """Kastamonu Üniversitesi + OİDB + SKS + Fakülte/MYO + Bölüm Sınav PDF + ÜBYS duyurularını tarar."""
+    hints = program_hints or [str(x) for x in (swiss_state.get("detected_program_hints") or []) if x]
+    extra_sources = _merge_unit_sources(
+        config,
+        program_hints=hints,
+        cached_sources=swiss_state.get("detected_faculty_sources"),
+    )
     try:
-        combined = fetch_all_announcements(extra_sources=config.announcement_urls)
+        dept_pdfs = fetch_department_exam_links(extra_sources, hints) if (extra_sources and hints) else []
+    except Exception:
+        dept_pdfs = []
+
+    try:
+        site_anns = fetch_all_announcements(extra_sources=extra_sources)
     except Exception as exc:
         logger.warning("Duyuru modülünde hata: %s", exc)
-        combined = []
+        site_anns = []
 
-    seen_combined_ids = {a.announcement_id for a in combined}
-    for ha in home_announcements or []:
-        if ha.announcement_id not in seen_combined_ids:
-            seen_combined_ids.add(ha.announcement_id)
-            combined.append(ha)
+    combined: list[Announcement] = []
+    seen_combined_ids: set[str] = set()
+    for item in [*site_anns, *(home_announcements or []), *dept_pdfs]:
+        if item.announcement_id not in seen_combined_ids:
+            seen_combined_ids.add(item.announcement_id)
+            combined.append(item)
 
     if not combined:
         return False, []
@@ -1121,7 +1170,8 @@ def run_weather_preview(config: Config, notify_test: bool = False) -> int:
 
 def run_announcements_preview(config: Config, notify_test: bool = False) -> int:
     """Kastamonu Üniversitesi, OİDB, SKS ve yapılandırılmış duyuruları gösterir."""
-    items = fetch_all_announcements(extra_sources=config.announcement_urls)
+    extra_sources = _merge_unit_sources(config)
+    items = fetch_all_announcements(extra_sources=extra_sources)
     if config.announcement_keywords:
         items = filter_new_announcements(items, seen_ids=set(), keywords=config.announcement_keywords)
     _print_announcements(items)
@@ -1200,7 +1250,9 @@ def run_schedule_preview(
                 password=config.ubys_password,
                 user_group_id=config.ubys_user_group_id,
             )
-            slots = client.fetch_weekly_schedule(dump_dir=dump_dir)
+            courses = client.fetch_grades(all_semesters=False, fetch_details=False, fetch_materials=False)
+            sem_hint = courses[0].semester if courses else None
+            slots = client.fetch_weekly_schedule(dump_dir=dump_dir, semester_hint=sem_hint)
     except Exception as exc:
         logger.error("Ders programı çekilemedi: %s", exc)
         return 1
@@ -1218,9 +1270,11 @@ def run_exams_preview(
     notify_test: bool = False,
     dump_html: bool = False,
 ) -> int:
-    """ÜBYS sınav takvimini çekip ekrana (ve Telegram'a) yazdırır."""
+    """ÜBYS sınav takvimini ve bölüm sınav duyuru/PDF'lerini çekip yazdırır."""
     dump_dir = Path("debug_html") if dump_html else None
     today = now_tr().date()
+    hints: list[str] = []
+    home_anns: list[Announcement] = []
     try:
         with UBYSClient(base_url=config.ubys_base_url) as client:
             client.login(
@@ -1228,14 +1282,34 @@ def run_exams_preview(
                 password=config.ubys_password,
                 user_group_id=config.ubys_user_group_id,
             )
+            client.fetch_grades(all_semesters=False, fetch_details=False, fetch_materials=False)
+            hints = client.student_program_hints
+            home_anns = client.home_announcements
             exams = client.fetch_exam_schedule(dump_dir=dump_dir)
     except Exception as exc:
         logger.error("Sınav takvimi çekilemedi: %s", exc)
         return 1
 
+    unit_sources = _merge_unit_sources(config, program_hints=hints)
+    dept_pdfs = fetch_department_exam_links(unit_sources, hints) if (unit_sources and hints) else []
+    all_anns = fetch_all_announcements(extra_sources=unit_sources) if config.enable_announcements else []
+    exam_anns: list[Announcement] = []
+    seen_ids: set[str] = set()
+    for a in [*dept_pdfs, *[x for x in [*home_anns, *all_anns] if is_exam_announcement(x)]]:
+        if a.announcement_id not in seen_ids:
+            seen_ids.add(a.announcement_id)
+            exam_anns.append(a)
+
     _print_exam_schedule(exams)
+    if exam_anns:
+        print("\n=== Bölüm / Fakülte Sınav Programı & PDF'ler ===")
+        for ann in exam_anns[:6]:
+            print(f"• [{ann.source}] {ann.title} -> {ann.url}")
     if notify_test:
-        if not _send_telegram_safe(config, format_exam_schedule(exams, today, config.ubys_base_url)):
+        if not _send_telegram_safe(
+            config,
+            format_exam_schedule(exams, today, config.ubys_base_url, exam_announcements=exam_anns),
+        ):
             return 1
         logger.info("Sınav takvimi Telegram'a gönderildi.")
     return 0
@@ -1549,14 +1623,14 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
     overall_ok = True
     dump_dir = Path("debug_html") if dump_html else None
     home_anns: list[Announcement] = []
+    program_hints: list[str] = []
+    exams: list[ExamScheduleItem] = []
     module_statuses: list[str] = []
 
     if config.enable_grades:
         transcript_summary: Optional[TranscriptSummary] = None
         slots: list[ScheduleSlot] = []
-        exams: list[ExamScheduleItem] = []
         home_routes: list[str] = []
-        program_hints: list[str] = []
         base_gano: Optional[float] = None
         try:
             with UBYSClient(base_url=config.ubys_base_url) as client:
@@ -1584,7 +1658,8 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                         logger.warning("Transkript alınamadı: %s", t_exc)
                 if config.enable_schedule:
                     try:
-                        slots = client.fetch_weekly_schedule(dump_dir=dump_dir)
+                        sem_hint = courses[0].semester if courses else None
+                        slots = client.fetch_weekly_schedule(dump_dir=dump_dir, semester_hint=sem_hint)
                     except Exception:
                         pass
                 if config.enable_exam_schedule:
@@ -1662,17 +1737,8 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
                 else:
                     module_statuses.append("• 🗓️ <b>Ders Programı:</b> ℹ️ ÜBYS sayfasında kayıt bulunamadı")
 
-            if config.enable_exam_schedule:
-                if exams:
-                    _print_exam_schedule(exams)
-                    module_statuses.append(f"• 📝 <b>Sınav Takvimi:</b> ✅ {len(exams)} sınav")
-                    if notify_test:
-                        if not _send_telegram_safe(
-                            config, format_exam_schedule(exams, now_tr().date(), config.ubys_base_url)
-                        ):
-                            overall_ok = False
-                else:
-                    module_statuses.append("• 📝 <b>Sınav Takvimi:</b> ℹ️ ÜBYS'de yayınlanmış sınav bulunamadı")
+            if config.enable_exam_schedule and exams:
+                _print_exam_schedule(exams)
 
             if config.enable_materials:
                 mat_count = sum(len(c.materials) for c in courses)
@@ -1714,18 +1780,66 @@ def _run_test_all(config: Config, notify_test: bool = False, dump_html: bool = F
         if cal_rc != 0:
             overall_ok = False
 
+    unit_sources = _merge_unit_sources(config, program_hints=program_hints)
+    dept_pdfs: list[Announcement] = []
+    if (config.enable_announcements or config.enable_exam_schedule) and unit_sources and program_hints:
+        try:
+            dept_pdfs = fetch_department_exam_links(unit_sources, program_hints)
+        except Exception:
+            dept_pdfs = []
+
+    anns: list[Announcement] = []
+    if config.enable_announcements or (config.enable_exam_schedule and not exams):
+        site_anns = fetch_all_announcements(extra_sources=unit_sources)
+        seen_a: set[str] = set()
+        for item in [*site_anns, *home_anns, *dept_pdfs]:
+            if item.announcement_id not in seen_a:
+                seen_a.add(item.announcement_id)
+                anns.append(item)
+
+    if config.enable_exam_schedule:
+        exam_anns: list[Announcement] = []
+        seen_ex_a: set[str] = set()
+        for item in [*dept_pdfs, *[x for x in anns if is_exam_announcement(x)]]:
+            if item.announcement_id not in seen_ex_a:
+                seen_ex_a.add(item.announcement_id)
+                exam_anns.append(item)
+        if exams or exam_anns:
+            if exams and exam_anns:
+                exam_note = f"✅ {len(exams)} sınav + {len(exam_anns)} duyuru/PDF"
+            elif exams:
+                exam_note = f"✅ {len(exams)} sınav"
+            else:
+                exam_note = f"✅ {len(exam_anns)} bölüm duyuru/PDF"
+            module_statuses.append(f"• 📝 <b>Sınav Takvimi:</b> {exam_note}")
+            if exam_anns:
+                print("\n=== Bölüm / Fakülte Sınav Programı & PDF'ler ===")
+                for ea in exam_anns[:6]:
+                    print(f"• [{ea.source}] {ea.title} -> {ea.url}")
+            if notify_test:
+                if not _send_telegram_safe(
+                    config,
+                    format_exam_schedule(
+                        exams,
+                        now_tr().date(),
+                        config.ubys_base_url,
+                        exam_announcements=exam_anns,
+                    ),
+                ):
+                    overall_ok = False
+        else:
+            module_statuses.append("• 📝 <b>Sınav Takvimi:</b> ℹ️ ÜBYS veya bölüm sayfasında sınav kaydı bulunamadı")
+
     if config.enable_announcements:
-        anns = fetch_all_announcements(extra_sources=config.announcement_urls)
-        seen_a = {a.announcement_id for a in anns}
-        for ha in home_anns:
-            if ha.announcement_id not in seen_a:
-                anns.append(ha)
-        if config.announcement_keywords:
-            anns = filter_new_announcements(anns, seen_ids=set(), keywords=config.announcement_keywords)
-        _print_announcements(anns)
-        module_statuses.append(f"• 📢 <b>Duyurular:</b> ✅ {len(anns)} duyuru")
-        if notify_test and anns:
-            if not _send_telegram_safe(config, format_announcements(anns, is_preview=True)):
+        filtered_anns = (
+            filter_new_announcements(anns, seen_ids=set(), keywords=config.announcement_keywords)
+            if config.announcement_keywords
+            else anns
+        )
+        _print_announcements(filtered_anns)
+        module_statuses.append(f"• 📢 <b>Duyurular:</b> ✅ {len(filtered_anns)} duyuru")
+        if notify_test and filtered_anns:
+            if not _send_telegram_safe(config, format_announcements(filtered_anns, is_preview=True)):
                 overall_ok = False
 
     if notify_test and module_statuses:
@@ -1860,11 +1974,24 @@ def run_once(
             state_dirty = True
 
     fetched_announcements: list[Announcement] = []
+    if ubys_extras.get("program_hints"):
+        p_hints = list(ubys_extras["program_hints"])
+        if swiss_state.get("detected_program_hints") != p_hints:
+            swiss_state["detected_program_hints"] = p_hints
+            swiss_state["detected_faculty_sources"] = [
+                list(pair)
+                for pair in _merge_unit_sources(config, program_hints=p_hints)
+                if pair not in config.announcement_urls
+            ]
+            working_state["swiss_tool"] = swiss_state
+            state_dirty = True
+
     if config.enable_announcements:
         ann_dirty, fetched_announcements = _run_announcements_module(
             config,
             swiss_state,
             home_announcements=ubys_extras.get("home_announcements"),
+            program_hints=ubys_extras.get("program_hints"),
         )
         if ann_dirty:
             working_state["swiss_tool"] = swiss_state

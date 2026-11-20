@@ -6,7 +6,12 @@ import logging
 from datetime import date, datetime
 from typing import Any, Callable, Optional
 
-from .announcements import fetch_all_announcements
+from .announcements import (
+    fetch_all_announcements,
+    fetch_department_exam_links,
+    infer_faculty_sources,
+    is_exam_announcement,
+)
 from .attendance import evaluate_all_attendance
 from .calendar_tracker import fetch_calendar_events, filter_events_by_categories, find_ongoing_and_upcoming
 from .config import Config, ConfigError, parse_weight_pair
@@ -316,7 +321,16 @@ def handle_command(
     if command == "duyuru":
         anns = context.get("announcements")
         if not isinstance(anns, list) or not anns:
-            anns = fetch_all_announcements(extra_sources=config.announcement_urls)
+            swiss_state = context.get("swiss_state") or {}
+            extra_sources = list(config.announcement_urls)
+            seen_u = {u.rstrip("/").lower() for _, u in extra_sources}
+            for raw in swiss_state.get("detected_faculty_sources") or []:
+                if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                    u = str(raw[1]).strip()
+                    if u and u.rstrip("/").lower() not in seen_u:
+                        seen_u.add(u.rstrip("/").lower())
+                        extra_sources.append((str(raw[0]), u))
+            anns = fetch_all_announcements(extra_sources=extra_sources)
             context["announcements"] = anns
         return format_announcements(anns, is_preview=True)
 
@@ -368,7 +382,31 @@ def handle_command(
 
         if command == "sinav":
             exams = _get_or_fetch_exams(config, context)
-            return format_exam_schedule(exams, today, config.ubys_base_url)
+            swiss_state = context.get("swiss_state") or {}
+            p_hints = [str(x) for x in (swiss_state.get("detected_program_hints") or []) if x]
+            unit_sources = list(config.announcement_urls)
+            seen_u = {u.rstrip("/").lower() for _, u in unit_sources}
+            for pair in infer_faculty_sources(p_hints, f"{config.ubys_program or ''} {config.calendar_faculty or ''}"):
+                if pair[1].rstrip("/").lower() not in seen_u:
+                    seen_u.add(pair[1].rstrip("/").lower())
+                    unit_sources.append(pair)
+            for raw in swiss_state.get("detected_faculty_sources") or []:
+                if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                    u = str(raw[1]).strip()
+                    if u and u.rstrip("/").lower() not in seen_u:
+                        seen_u.add(u.rstrip("/").lower())
+                        unit_sources.append((str(raw[0]), u))
+            dept_pdfs = fetch_department_exam_links(unit_sources, p_hints) if (unit_sources and p_hints) else []
+            cached_anns = context.get("announcements")
+            if not isinstance(cached_anns, list):
+                cached_anns = fetch_all_announcements(extra_sources=unit_sources) if unit_sources else []
+            exam_anns = []
+            seen_ea: set[str] = set()
+            for item in [*dept_pdfs, *[x for x in cached_anns if is_exam_announcement(x)]]:
+                if item.announcement_id not in seen_ea:
+                    seen_ea.add(item.announcement_id)
+                    exam_anns.append(item)
+            return format_exam_schedule(exams, today, config.ubys_base_url, exam_announcements=exam_anns)
 
         if command == "ozet":
             courses = _get_or_fetch_courses(config, context)

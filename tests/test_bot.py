@@ -15,8 +15,12 @@ import httpx
 
 from src.announcements import (
     filter_new_announcements,
+    infer_faculty_sources,
+    is_exam_announcement,
     make_announcement_id,
     parse_announcements_html,
+    parse_department_exam_pdfs,
+    parse_department_program_url,
 )
 from src.attendance import (
     build_attendance_snapshot,
@@ -121,7 +125,7 @@ from src.schedule import (
     parse_exam_schedule,
     parse_weekly_schedule,
 )
-from src.ubys_client import LoginError, NetworkError
+from src.ubys_client import LoginError, NetworkError, UBYSClient
 from src.ubys_parser import (
     SessionExpiredError,
     discover_home_routes,
@@ -2095,6 +2099,136 @@ class PolishAndReliabilityTests(unittest.TestCase):
         self.assertTrue(all("SECRET" not in r for r in routes))
         self.assertEqual(parse_schedule_url(home_js_html), "/AIS/Student/LessonProgram/Index?sapid=SECRET123")
         self.assertEqual(parse_exam_schedule_url(home_js_html), "/AIS/Student/StudentExam/Index?sapid=SECRET123")
+
+    def test_netix_weekly_schedule_post_and_department_exam_pdfs(self) -> None:
+        # 1. _weeklySchedulle (Netix Events[] şeması, StartHour/FinishHour, WorkCenterName, çoklu hafta deduplikasyonu)
+        weekly_payload = [
+            {
+                "Events": [
+                    {
+                        "DayOfWeek": 1,
+                        "StartHour": 9,
+                        "StartMinute": 0,
+                        "FinishHour": 10,
+                        "FinishMinute": 45,
+                        "CourseName": "BPBZ201.1 İnternet Programcılığı",
+                        "WorkCenterName": "KMYO-Lab 2",
+                        "InstructorName": "Dr. Rahime Çelik\r\nGörgüt",
+                    },
+                    {
+                        "DayOfWeek": 1,
+                        "StartHour": 9,
+                        "StartMinute": 0,
+                        "FinishHour": 10,
+                        "FinishMinute": 45,
+                        "CourseName": "BPBZ201.1 İnternet Programcılığı",
+                        "WorkCenterName": "KMYO-Lab 2",
+                        "InstructorName": "Dr. Rahime Çelik Görgüt",
+                    },
+                    {
+                        "DayOfWeek": 3,
+                        "StartHour": 13,
+                        "StartMinute": 30,
+                        "FinishHour": 15,
+                        "FinishMinute": 15,
+                        "CourseName": "BPBZ207.1 Bilgisayar Ağları",
+                        "WorkCenterName": "Derslik 104",
+                        "InstructorName": "Öğr. Gör. Hakan Can",
+                    },
+                ]
+            }
+        ]
+        b64_sched = base64.b64encode(json.dumps(weekly_payload).encode("utf-8")).decode("ascii")
+        sched_html = f"<script>var _weeklySchedulle = JSON.parse(Base64.decode(\"{b64_sched}\"));</script>"
+        slots = parse_weekly_schedule(sched_html)
+        self.assertEqual(len(slots), 2)
+        self.assertEqual(slots[0].day_of_week, 0)
+        self.assertEqual(slots[0].start_time, "09:00")
+        self.assertEqual(slots[0].end_time, "10:45")
+        self.assertEqual(slots[0].course_code, "BPBZ201")
+        self.assertEqual(slots[0].course_name, "İnternet Programcılığı")
+        self.assertEqual(slots[0].classroom, "KMYO-Lab 2")
+        self.assertEqual(slots[0].instructor, "Dr. Rahime Çelik Görgüt")
+
+        # 2. UBYSClient.fetch_weekly_schedule GetWeeklySchedule POST çağrısı
+        student_info_json = base64.b64encode(
+            json.dumps(
+                {
+                    "Programs": [
+                        {
+                            "StudentId": 998877,
+                            "RecordYear": 2025,
+                            "RecordSemester": 1,
+                            "UnitName": "Kastamonu Meslek Yüksekokulu",
+                            "AcademicProgramName": "Bilgisayar Programcılığı",
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+        ).decode("ascii")
+        home_stub = f'<script>var StudentInfo = JSON.parse(Base64.decode("{student_info_json}"));</script>'
+        with UBYSClient("https://ubys.kastamonu.edu.tr") as ubys:
+            ubys._logged_in = True
+            with patch.object(ubys, "_request") as mock_req:
+                mock_req.side_effect = [
+                    MagicMock(status_code=200, url="https://ubys.kastamonu.edu.tr/AIS/Student/Home/Index", text=home_stub),
+                    MagicMock(status_code=200, url="https://ubys.kastamonu.edu.tr/AIS/Student/Home/GetWeeklySchedule", text=sched_html),
+                ]
+                fetched_slots = ubys.fetch_weekly_schedule(semester_hint="2026 - Güz")
+        self.assertEqual(len(fetched_slots), 2)
+        post_call = mock_req.call_args_list[1]
+        self.assertEqual(post_call.args[0], "POST")
+        self.assertIn("GetWeeklySchedule", post_call.args[1])
+        self.assertEqual(post_call.kwargs["json"]["co"]["StudentId"], 998877)
+        self.assertEqual(post_call.kwargs["json"]["co"]["Year"], 2026)
+        self.assertEqual(post_call.kwargs["json"]["co"]["SemesterId"], "1")
+
+        # 3. Fakülte/MYO otomatik eşleştirme & bölüm Sınav Programları sekmesinden aktif dönem PDF çıkarımı
+        units = infer_faculty_sources(["Kastamonu Meslek Yüksekokulu - Bilgisayar Programcılığı"])
+        self.assertEqual(units, [("KMYO", "https://kmyo.kastamonu.edu.tr/")])
+
+        kmyo_menu_html = """
+        <nav>
+          <a href="/index.php/boeluemler/bilgisayar-teknolojileri/bilgisayar-programciligi">Bilgisayar Programcılığı</a>
+          <a href="/index.php/boeluemler/elektrik/mekatronik">Mekatronik</a>
+        </nav>
+        """
+        dept_url = parse_department_program_url(
+            kmyo_menu_html,
+            "https://kmyo.kastamonu.edu.tr/",
+            ["Kastamonu Meslek Yüksekokulu", "Bilgisayar Programcılığı"],
+        )
+        self.assertEqual(
+            dept_url,
+            "https://kmyo.kastamonu.edu.tr/index.php/boeluemler/bilgisayar-teknolojileri/bilgisayar-programciligi",
+        )
+
+        dept_html = """
+        <ul>
+          <li><a href="#tab-ders">Ders Programları</a></li>
+          <li><a href="#tab-sinav">Sınav Programları</a></li>
+        </ul>
+        <div id="tab-sinav">
+          <p>Aktif Dönem İçin Tıklayınız</p>
+          <p>Bilgisayar Programcılığı Programı 2026 - 2027 Eğitim Öğretim Yılı Güz Yarıyılı Vize Takvimi için
+            <a href="/images/2026-2027/Duyurular/Sinav_Programlari/2026-2027-Gz/Vize/bil.pdf">TIKLAYINIZ</a>
+          </p>
+          <p>Önceki Dönem Programları İçin Tıklayınız</p>
+          <p>Bilgisayar Programcılığı Programı 2024 - 2025 Vize Takvimi için
+            <a href="/images/2024-2025/vize.pdf">TIKLAYINIZ</a>
+          </p>
+        </div>
+        """
+        pdfs = parse_department_exam_pdfs(dept_html, dept_url, "KMYO")
+        self.assertEqual(len(pdfs), 1)
+        self.assertEqual(pdfs[0].source, "KMYO Sınav PDF")
+        self.assertIn("2026 - 2027", pdfs[0].title)
+        self.assertNotIn("2024", pdfs[0].title)
+        self.assertTrue(is_exam_announcement(pdfs[0]))
+
+        exam_msg = format_exam_schedule([], date(2026, 11, 20), "https://ubys.kastamonu.edu.tr", exam_announcements=pdfs)
+        self.assertIn("Bölüm / Fakülte Sınav Programı", exam_msg)
+        self.assertIn("bil.pdf", exam_msg)
 
 
 if __name__ == "__main__":

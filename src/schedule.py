@@ -285,32 +285,82 @@ def _parse_grid_cell_slot(
     )
 
 
+def _fmt_hour_minute(hour_val: Any, min_val: Any) -> str:
+    if hour_val is None or hour_val == "":
+        return ""
+    try:
+        return f"{int(hour_val):02d}:{int(min_val or 0):02d}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _split_code_and_name(raw_code: str, raw_name: str) -> tuple[str, str]:
+    c_code = _clean_text(raw_code)
+    c_name = _clean_text(raw_name)
+    if not c_code and c_name:
+        m = re.match(
+            r"^([A-ZÇĞİÖŞÜ]{2,6}\s*-?\s*\d{3,4}[A-Z]?)(?:\.\d+)?(?:\s+[-–:]?\s*(.+))?$",
+            c_name,
+        )
+        if m:
+            c_code = m.group(1).replace(" ", "")
+            c_name = _clean_text(m.group(2)) or c_code
+    elif c_code:
+        c_code = re.sub(r"\.\d+$", "", c_code)
+    return c_code, c_name
+
+
 def parse_weekly_schedule(html: str) -> list[ScheduleSlot]:
-    """ÜBYS haftalık ders programı sayfasından (_jsm, grid tablo veya liste tablo) ders saatlerini çıkarır."""
+    """ÜBYS haftalık ders programı sayfasından (_weeklySchedulle/_jsm, grid tablo veya liste tablo) ders saatlerini çıkarır."""
     slots: list[ScheduleSlot] = []
-    seen: set[tuple[int, str, str, str]] = set()
+    seen: set[tuple[int, str, str, str, str]] = set()
 
     def _add(slot: Optional[ScheduleSlot]) -> None:
         if slot is None:
             return
-        key = (slot.day_of_week, slot.start_time, slot.course_code, _tr_lower(slot.course_name))
+        key = (
+            slot.day_of_week,
+            slot.start_time,
+            slot.end_time,
+            slot.course_code,
+            _tr_lower(slot.course_name),
+        )
         if key in seen:
             return
         seen.add(key)
         slots.append(slot)
 
-    # 1. Base64 JSON (_jsm)
+    # 1. Base64 JSON (_weeklySchedulle / _jsm)
     def _walk_jsm(obj: Any) -> None:
         if isinstance(obj, dict):
             day_idx = _parse_day_index(
                 obj.get("DayOfWeek") if obj.get("DayOfWeek") is not None else obj.get("Day") or obj.get("DayName")
             )
-            c_name = _clean_text(str(obj.get("CourseName") or obj.get("LessonName") or ""))
-            c_code = _clean_text(str(obj.get("CourseCode") or ""))
-            start = _norm_time(str(obj.get("StartTime") or obj.get("StartHour") or obj.get("Start") or ""))
+            raw_name = str(obj.get("CourseName") or obj.get("LessonName") or "")
+            raw_code = str(obj.get("CourseCode") or "")
+            c_code, c_name = _split_code_and_name(raw_code, raw_name)
+            start = _norm_time(str(obj.get("StartTime") or obj.get("Start") or ""))
+            if not start:
+                start = _fmt_hour_minute(obj.get("StartHour"), obj.get("StartMinute"))
             if day_idx is not None and (c_name or c_code):
-                end = _norm_time(str(obj.get("EndTime") or obj.get("EndHour") or obj.get("End") or ""))
-                room = _clean_text(str(obj.get("Classroom") or obj.get("ClassRoomName") or obj.get("RoomName") or "")) or None
+                end = _norm_time(str(obj.get("EndTime") or obj.get("End") or ""))
+                if not end:
+                    end = _fmt_hour_minute(
+                        obj.get("FinishHour") if obj.get("FinishHour") is not None else obj.get("EndHour"),
+                        obj.get("FinishMinute") if obj.get("FinishMinute") is not None else obj.get("EndMinute"),
+                    )
+                room = (
+                    _clean_text(
+                        str(
+                            obj.get("WorkCenterName")
+                            or obj.get("Classroom")
+                            or obj.get("ClassRoomName")
+                            or obj.get("RoomName")
+                            or ""
+                        )
+                    )
+                    or None
+                )
                 inst = _clean_text(str(obj.get("InstructorName") or obj.get("Instructor") or "")) or None
                 _add(
                     ScheduleSlot(
@@ -446,17 +496,42 @@ def parse_exam_schedule(
         seen.add(k)
         exams.append(item)
 
-    # 1. Base64 JSON (_jsm)
+    # 1. Base64 JSON (_jsm / _weeklySchedulle)
     def _walk_jsm(obj: Any) -> None:
         if isinstance(obj, dict):
-            raw_date = obj.get("ExamDate") or obj.get("Date") or obj.get("ExamStartDate")
+            raw_date = obj.get("ExamDate") or obj.get("ExamStartDate")
+            if not raw_date:
+                ev_marker = _tr_lower(f"{obj.get('EventType') or ''} {obj.get('CourseName') or ''}")
+                if obj.get("IsExam") or any(k in ev_marker for k in ("sınav", "sinav", "vize", "final", "bütünleme", "butunleme")):
+                    raw_date = obj.get("Date") or obj.get("StartDate") or obj.get("EventDate")
+            else:
+                raw_date = raw_date or obj.get("Date")
             ex_date = _parse_exam_date(raw_date, default_year=default_year)
-            c_name = _clean_text(str(obj.get("CourseName") or ""))
-            c_code = _clean_text(str(obj.get("CourseCode") or ""))
+            c_code, c_name = _split_code_and_name(
+                str(obj.get("CourseCode") or ""),
+                str(obj.get("CourseName") or ""),
+            )
             if ex_date is not None and (c_name or c_code):
-                ex_type = _clean_text(str(obj.get("ExamTypeName") or obj.get("ExamName") or obj.get("ExamType") or "Sınav"))
-                ex_time = _norm_time(str(obj.get("ExamTime") or obj.get("StartTime") or obj.get("ExamHour") or raw_date or "")) or None
-                room = _clean_text(str(obj.get("Classroom") or obj.get("HallName") or obj.get("RoomName") or "")) or None
+                ex_type = _clean_text(
+                    str(obj.get("ExamTypeName") or obj.get("ExamName") or obj.get("ExamType") or obj.get("EventType") or "Sınav")
+                )
+                ex_time = (
+                    _norm_time(str(obj.get("ExamTime") or obj.get("StartTime") or obj.get("ExamHour") or raw_date or ""))
+                    or _fmt_hour_minute(obj.get("StartHour"), obj.get("StartMinute"))
+                    or None
+                )
+                room = (
+                    _clean_text(
+                        str(
+                            obj.get("WorkCenterName")
+                            or obj.get("Classroom")
+                            or obj.get("HallName")
+                            or obj.get("RoomName")
+                            or ""
+                        )
+                    )
+                    or None
+                )
                 seat = _clean_text(str(obj.get("SeatNo") or obj.get("DeskNo") or obj.get("SiraNo") or "")) or None
                 _add(
                     ExamScheduleItem(
