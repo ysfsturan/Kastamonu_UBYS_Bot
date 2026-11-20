@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from typing import Any, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup, Tag
 
 from .models import (
+    Announcement,
     CourseGrade,
+    CourseMaterial,
     ExamGrade,
     TranscriptCourse,
     TranscriptSemester,
@@ -680,8 +683,149 @@ def _find_exam_table(container: Tag) -> Optional[Tag]:
     return None
 
 
-def parse_class_detail(html: str) -> dict[str, Any]:
-    """/AIS/Student/Class/ClassDetail HTML sayfasından sınav ve ortalama detaylarını ayrıştırır."""
+_MATERIAL_EXT_RE = re.compile(r"\.(?:pdf|docx?|pptx?|xlsx?|zip|rar|txt)(?:$|\?)", re.IGNORECASE)
+_DUE_DATE_RE = re.compile(r"\b(\d{1,2}[./-]\d{1,2}[./-]\d{4}(?:\s+\d{1,2}[:.]\d{2})?)\b")
+
+
+def _make_material_id(course_code: str, category: str, title: str, url: Optional[str]) -> str:
+    basis = f"{_tr_lower(course_code)}::{category}::{url or ''}::{_tr_lower(title)}"
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _find_material_partial_urls(soup: BeautifulSoup) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    keywords = ("materyal", "dosya", "doküman", "dokuman", "ödev", "odev", "duyuru", "kaynak", "homework", "material", "announcement")
+    for tag in soup.find_all(["a", "button", "li"]):
+        text = _tr_lower(tag.get_text(" ", strip=True))
+        if not any(kw in text for kw in keywords):
+            continue
+        for attr in ("data-url", "href", "onclick"):
+            val = str(tag.get(attr) or "").strip()
+            if not val or val == "#" or val.startswith("javascript:void"):
+                continue
+            found: Optional[str] = None
+            if attr == "onclick":
+                m = re.search(r"""['"]([^'"]*(?:ClassDetail|Material|Homework|Document|File|Announcement|Odev|Duyuru|Kaynak)[^'"]*)['"]""", val, re.IGNORECASE)
+                if m:
+                    found = m.group(1)
+            elif not val.startswith("#"):
+                found = val
+            if found and found not in seen:
+                seen.add(found)
+                urls.append(found)
+                break
+    return urls
+
+
+def parse_course_materials(
+    html: str,
+    course_code: str = "",
+    course_name: str = "",
+    base_url: str = "",
+) -> list[CourseMaterial]:
+    """Ders detayı veya alt sekmelerinden dosya/materyal, ödev ve ders duyurularını çıkarır."""
+    if is_login_page(html):
+        raise SessionExpiredError("Ders materyali alınırken oturum süresi doldu.")
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    items: list[CourseMaterial] = []
+    seen_ids: set[str] = set()
+
+    def _add(category: str, title: str, url: Optional[str] = None, due_date: Optional[str] = None, pub_date: Optional[str] = None) -> None:
+        cleaned_title = _clean_text(title)
+        if not cleaned_title or len(cleaned_title) < 2:
+            return
+        low_title = _tr_lower(cleaned_title)
+        if any(skip in low_title for skip in ("kayıt bulunamadı", "dosya bulunamadı", "ödev bulunamadı", "duyuru bulunamadı")):
+            return
+        abs_url = urljoin(base_url, url) if (url and base_url) else url
+        mat_id = _make_material_id(course_code, category, cleaned_title, abs_url)
+        if mat_id in seen_ids:
+            return
+        seen_ids.add(mat_id)
+        items.append(
+            CourseMaterial(
+                material_id=mat_id,
+                course_code=course_code,
+                course_name=course_name,
+                category=category,
+                title=cleaned_title,
+                url=abs_url,
+                due_date=due_date,
+                published_date=pub_date,
+            )
+        )
+
+    # 1. Dosya / Materyal indirme bağlantıları
+    for a in soup.find_all("a", href=True):
+        href = str(a["href"]).strip()
+        if not href or href == "#" or href.startswith("javascript:"):
+            continue
+        low_h = href.lower()
+        if (
+            _MATERIAL_EXT_RE.search(low_h)
+            or "/file/download" in low_h
+            or "downloadfile" in low_h
+            or "getfile" in low_h
+            or "/ais/student/class/download" in low_h
+        ):
+            title = _clean_text(a.get_text(" ", strip=True)) or _clean_text(str(a.get("title") or "")) or href.split("/")[-1].split("?")[0]
+            _add("dosya", title, url=href)
+
+    # 2. Ödev ve Duyuru tabloları
+    for table in soup.find_all("table"):
+        header_row = _find_header_row(table)
+        header_text = _tr_lower(header_row.get_text(" ", strip=True)) if header_row else ""
+        if "sınav tipi" in header_text or "sınav notu" in header_text:
+            continue
+        is_hw = any(kw in header_text for kw in ("ödev", "odev", "teslim", "proje"))
+        is_ann = any(kw in header_text for kw in ("duyuru", "mesaj", "başlık", "baslik")) and not is_hw
+        is_file = any(kw in header_text for kw in ("dosya", "materyal", "doküman", "dokuman", "kaynak")) and not is_hw
+        if not (is_hw or is_ann or is_file):
+            continue
+
+        tbody = table.find("tbody") or table
+        headers = [_tr_lower(th.get_text(" ", strip=True)) for th in header_row.find_all(["th", "td"], recursive=False)] if header_row else []
+        title_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ("başlık", "baslik", "ad", "konu", "dosya", "açıklama"))), 0)
+        due_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ("teslim", "son tarih", "bitiş", "bitis"))), -1)
+        pub_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ("tarih", "yayın", "yayin")) and i != due_idx), -1)
+
+        cat = "ödev" if is_hw else ("duyuru" if is_ann else "dosya")
+        for row in tbody.find_all("tr", recursive=False):
+            if row == header_row:
+                continue
+            cells = row.find_all("td", recursive=False)
+            if not cells:
+                continue
+            title_cell = cells[title_idx] if title_idx < len(cells) else cells[0]
+            title = _clean_text(title_cell.get_text(" ", strip=True))
+            link_tag = row.find("a", href=True)
+            href = str(link_tag["href"]).strip() if link_tag and not str(link_tag["href"]).startswith("#") else None
+            due_date = _clean_text(cells[due_idx].get_text(" ", strip=True)) if 0 <= due_idx < len(cells) else None
+            pub_date = _clean_text(cells[pub_idx].get_text(" ", strip=True)) if 0 <= pub_idx < len(cells) else None
+            if not due_date and is_hw:
+                m_due = _DUE_DATE_RE.search(_clean_text(row.get_text(" ", strip=True)))
+                if m_due:
+                    due_date = m_due.group(1)
+            _add(
+                cat,
+                title,
+                url=href,
+                due_date=due_date if due_date not in {"", "-"} else None,
+                pub_date=pub_date if pub_date not in {"", "-"} else None,
+            )
+
+    return items
+
+
+def parse_class_detail(
+    html: str,
+    course_code: str = "",
+    course_name: str = "",
+    base_url: str = "",
+) -> dict[str, Any]:
+    """/AIS/Student/Class/ClassDetail HTML sayfasından sınav, ortalama, devamsızlık ve materyal detaylarını ayrıştırır."""
     if is_login_page(html):
         raise SessionExpiredError("Detay sayfası alınırken oturum süresi doldu.")
 
@@ -767,6 +911,13 @@ def parse_class_detail(html: str) -> dict[str, Any]:
 
     attendance_info = _extract_attendance_from_soup(soup)
     attendance_partial_url = _find_attendance_partial_url(soup)
+    materials = parse_course_materials(
+        html,
+        course_code=course_code,
+        course_name=course_name,
+        base_url=base_url,
+    )
+    material_partial_urls = _find_material_partial_urls(soup)
 
     return {
         "exams": exams,
@@ -775,6 +926,8 @@ def parse_class_detail(html: str) -> dict[str, Any]:
         "class_average": class_average,
         "attendance": attendance_info,
         "attendance_partial_url": attendance_partial_url,
+        "materials": materials,
+        "material_partial_urls": material_partial_urls,
     }
 
 
@@ -943,6 +1096,93 @@ def parse_transcript_url(home_html: str) -> Optional[str]:
         if "/ais/student/transcript" in low or "/ais/student/transkript" in low:
             return href
     return None
+
+
+def parse_schedule_url(home_html: str) -> Optional[str]:
+    """Öğrenci ana sayfasından Haftalık Ders Programı bağlantısını bulur."""
+    soup = BeautifulSoup(home_html or "", "html.parser")
+    for link in soup.find_all("a", href=True):
+        href = str(link["href"]).strip()
+        if not href or href == "#" or href.startswith("javascript:"):
+            continue
+        low_href = href.lower()
+        low_txt = _tr_lower(link.get_text(" ", strip=True))
+        if (
+            "weeklyschedule" in low_href
+            or "courseschedule" in low_href
+            or "schedule" in low_href
+            or "dersprogram" in low_href
+            or "ders programı" in low_txt
+            or "ders programi" in low_txt
+        ) and "exam" not in low_href and "sınav" not in low_txt:
+            return href
+    return None
+
+
+def parse_exam_schedule_url(home_html: str) -> Optional[str]:
+    """Öğrenci ana sayfasından Sınav Programı / Takvimi bağlantısını bulur."""
+    soup = BeautifulSoup(home_html or "", "html.parser")
+    for link in soup.find_all("a", href=True):
+        href = str(link["href"]).strip()
+        if not href or href == "#" or href.startswith("javascript:"):
+            continue
+        low_href = href.lower()
+        low_txt = _tr_lower(link.get_text(" ", strip=True))
+        if (
+            "examschedule" in low_href
+            or "examcalendar" in low_href
+            or "sinavprogram" in low_href
+            or "sınav takvim" in low_txt
+            or "sınav program" in low_txt
+            or "sinav program" in low_txt
+        ):
+            return href
+    return None
+
+
+def parse_ubys_home_announcements(home_html: str, base_url: str) -> list[Announcement]:
+    """Öğrenci ana sayfasındaki (/AIS/Student/Home/Index) ÜBYS duyurularını çıkarır."""
+    soup = BeautifulSoup(home_html or "", "html.parser")
+    results: list[Announcement] = []
+    seen: set[str] = set()
+    root = base_url.rstrip("/")
+
+    for panel in soup.find_all(["div", "section"]):
+        heading = panel.find(["div", "h3", "h4", "span"], class_=lambda c: c and "heading" in str(c).lower())
+        heading_txt = _tr_lower(heading.get_text(" ", strip=True)) if heading else ""
+        cls_txt = " ".join(panel.get("class") or []).lower()
+        id_txt = str(panel.get("id") or "").lower()
+        if not (
+            "duyuru" in heading_txt
+            or "announcement" in cls_txt
+            or "duyuru" in cls_txt
+            or "announcement" in id_txt
+            or "duyuru" in id_txt
+        ):
+            continue
+
+        for item in panel.find_all(["li", "tr", "a"]):
+            txt = _clean_text(item.get_text(" ", strip=True))
+            if len(txt) < 12 or "kayıt bulunamadı" in _tr_lower(txt) or "duyuru bulunamadı" in _tr_lower(txt):
+                continue
+            a_tag = item if item.name == "a" else item.find("a", href=True)
+            href = str(a_tag.get("href") or "").strip() if a_tag else ""
+            abs_url = urljoin(f"{root}/", href) if (href and not href.startswith("#") and not href.startswith("javascript:")) else f"{root}/AIS/Student/Home/Index"
+            ann_id = hashlib.sha1(f"ubys::{_tr_lower(txt)}".encode("utf-8")).hexdigest()[:16]
+            if ann_id in seen:
+                continue
+            seen.add(ann_id)
+            results.append(
+                Announcement(
+                    announcement_id=ann_id,
+                    source="ÜBYS",
+                    title=txt[:160],
+                    url=abs_url,
+                )
+            )
+            if len(results) >= 10:
+                return results
+    return results
 
 
 def _opt_float_tr(val: Any) -> Optional[float]:

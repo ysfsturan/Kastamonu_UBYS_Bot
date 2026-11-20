@@ -13,11 +13,22 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
+from src.announcements import (
+    filter_new_announcements,
+    make_announcement_id,
+    parse_announcements_html,
+)
 from src.attendance import (
     build_attendance_snapshot,
     diff_attendance,
     evaluate_all_attendance,
     evaluate_course_attendance,
+)
+from src.bot_commands import (
+    BOT_COMMANDS_VERSION,
+    handle_command,
+    parse_bot_command,
+    process_telegram_commands,
 )
 from src.calendar_tracker import (
     CalendarError,
@@ -56,34 +67,58 @@ from src.grade_calculator import (
     analyze_course_grades,
     calculate_final_targets,
     estimate_course_grade,
+    project_semester_gpa,
     resolve_course_weights,
     score_to_letter,
 )
 from src.main import TR_TZ, main as cli_main, run_once
 from src.models import (
+    Announcement,
     CalendarEvent,
     CourseCatalogEntry,
     CourseGrade,
+    CourseMaterial,
     DailyMenu,
     DiningItem,
     ExamGrade,
+    ExamScheduleItem,
+    GpaProjection,
+    ScheduleSlot,
     TranscriptCourse,
     TranscriptSemester,
     TranscriptSummary,
+    WeatherForecast,
 )
 from src.notifier import (
     TelegramNotifier,
+    format_announcements,
     format_attendance_alerts,
     format_attendance_report,
     format_baseline_summary,
     format_calendar_digest,
     format_calendar_reminders,
     format_daily_menu,
+    format_daily_schedule,
+    format_exam_reminders,
+    format_exam_schedule,
     format_gano_change,
+    format_gpa_projection,
     format_grade_calculator,
     format_grade_changes,
+    format_help_message,
+    format_material_alerts,
     format_transcript_summary,
+    format_weather_report,
+    format_weekly_briefing,
+    format_weekly_schedule,
     split_message,
+)
+from src.schedule import (
+    exam_reminder_key,
+    find_exam_reminders,
+    get_slots_for_day,
+    parse_exam_schedule,
+    parse_weekly_schedule,
 )
 from src.ubys_client import LoginError, NetworkError
 from src.ubys_parser import (
@@ -95,11 +130,21 @@ from src.ubys_parser import (
     normalize_score,
     normalize_status,
     parse_class_detail,
+    parse_course_materials,
+    parse_exam_schedule_url,
     parse_grades_index,
     parse_sap_id,
+    parse_schedule_url,
     parse_student_gano,
     parse_student_program_hints,
     parse_transcript,
+    parse_ubys_home_announcements,
+)
+from src.weather import (
+    WeatherError,
+    build_weather_advice,
+    describe_wmo_code,
+    parse_open_meteo_response,
 )
 
 SAMPLE_LOGIN_HTML = """
@@ -462,6 +507,13 @@ class NotifierAndFlowTests(unittest.TestCase):
                 enable_dining=False,
                 enable_calendar=False,
                 enable_catalog=False,
+                enable_weather=False,
+                enable_announcements=False,
+                enable_schedule=False,
+                enable_exam_schedule=False,
+                enable_materials=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
             )
 
             sample_courses = [
@@ -848,6 +900,13 @@ class SwissToolFlowTests(unittest.TestCase):
                 enable_dining=True,
                 enable_calendar=True,
                 enable_catalog=False,
+                enable_weather=False,
+                enable_announcements=False,
+                enable_schedule=False,
+                enable_exam_schedule=False,
+                enable_materials=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
                 notify_on_first_run=False,
             )
 
@@ -1483,6 +1542,13 @@ class CatalogAndCourseWeightsTests(unittest.TestCase):
                 enable_calendar=False,
                 enable_attendance=True,
                 enable_catalog=True,
+                enable_weather=False,
+                enable_announcements=False,
+                enable_schedule=False,
+                enable_exam_schedule=False,
+                enable_materials=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
                 notify_on_first_run=False,
             )
             courses_initial = [
@@ -1566,6 +1632,343 @@ class CatalogAndCourseWeightsTests(unittest.TestCase):
                     CourseGrade(semester="2026 - Güz", code="BPBZ205", name="Mesleki Yabancı Dil I")
                 ]
                 self.assertEqual(run_once(cfg), 0)
+
+
+class WeatherTests(unittest.TestCase):
+    def test_wmo_advice_and_open_meteo_parse(self) -> None:
+        self.assertEqual(describe_wmo_code(73), ("Kar Yağışlı", "❄️"))
+        advice_snow = build_weather_advice(-2.0, 3.0, 80, 35.0, 73)
+        self.assertIn("Kar yağışı", advice_snow)
+        self.assertIn("don riski", advice_snow)
+        self.assertIn("Rüzgâr", advice_snow)
+
+        sample_json = {
+            "current": {
+                "temperature_2m": 6.4,
+                "apparent_temperature": 4.1,
+                "weather_code": 61,
+                "wind_speed_10m": 14.0,
+            },
+            "daily": {
+                "time": ["2026-11-23", "2026-11-24", "2026-11-25"],
+                "weather_code": [61, 2, 0],
+                "temperature_2m_min": [2.0, 1.0, -1.0],
+                "temperature_2m_max": [10.0, 12.0, 13.0],
+                "precipitation_probability_max": [75, 20, 5],
+            },
+        }
+        wf = parse_open_meteo_response(sample_json, "Kastamonu (Kuzeykent)")
+        self.assertEqual(wf.forecast_date, date(2026, 11, 23))
+        self.assertEqual(wf.condition_text, "Hafif Yağmur")
+        self.assertEqual(wf.precip_probability, 75)
+        self.assertIn("şemsiye", wf.advice)
+        self.assertEqual(len(wf.daily_summaries), 3)
+        self.assertIsNotNone(wf.tomorrow_summary)
+
+        report_msg = format_weather_report(wf)
+        self.assertIn("Kastamonu (Kuzeykent) Hava Durumu", report_msg)
+        self.assertIn("3 Günlük Görünüm", report_msg)
+
+        menu = DailyMenu(
+            menu_date=date(2026, 11, 23),
+            items=[DiningItem(name="Mercimek Ç.", calories="120 kkal", category="Çorba")],
+            total_calories_min=120,
+            total_calories_max=120,
+        )
+        menu_with_weather = format_daily_menu(menu, weather=wf)
+        self.assertIn("Kastamonu (Kuzeykent)", menu_with_weather)
+        self.assertIn("Hafif Yağmur", menu_with_weather)
+
+
+class AnnouncementTests(unittest.TestCase):
+    def test_joomla_portal_ubys_and_keyword_filtering(self) -> None:
+        joomla_html = """
+        <div class="sppb-addon">
+          <a class="sppb-articles-scroller-link" href="/duyurular/123-guz-sinav-programi">
+            <span class="sppb-articles-scroller-day">18</span>
+            <span class="sppb-articles-scroller-month">Kas</span>
+            <div class="sppb-addon-articles-scroller-title">2026-2027 Güz Yarıyılı Ara Sınav Takvimi Açıklandı</div>
+            <div class="sppb-articles-scroller-introtext">Sınav salonları ÜBYS üzerinden ilan edilmiştir.</div>
+          </a>
+          <a class="sppb-articles-scroller-link" href="/duyurular/124-yemek-kart">
+            <span class="sppb-articles-scroller-day">17</span>
+            <span class="sppb-articles-scroller-month">Kas</span>
+            <div class="sppb-addon-articles-scroller-title">Yemek Kartı Bakiye Yükleme Noktaları Güncellendi</div>
+          </a>
+        </div>
+        """
+        items = parse_announcements_html(joomla_html, "OİDB", "https://oidb.kastamonu.edu.tr/")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].published_date, "18 Kas")
+        self.assertEqual(items[0].url, "https://oidb.kastamonu.edu.tr/duyurular/123-guz-sinav-programi")
+
+        portal_html = """
+        <a href="/tr/gundem/2026-kyk-burs-basvurulari-basladi">19 Kasım 2026 KYK Burs Başvuru Sonuçları ve Duyurusu</a>
+        <a href="/tr/gundem">Tümünü Göster</a>
+        """
+        portal_items = parse_announcements_html(portal_html, "Kastamonu Üni", "https://kastamonu.edu.tr/tr")
+        self.assertEqual(len(portal_items), 1)
+        self.assertIn("KYK Burs", portal_items[0].title)
+        self.assertEqual(portal_items[0].published_date, "19 Kasım 2026")
+
+        ubys_home_html = """
+        <div class="panel panel-default">
+          <div class="panel-heading">Duyurular</div>
+          <ul>
+            <li><a href="/AIS/Student/Home/Announcement?id=5">2026 Güz Mazeret Sınavı Başvuruları Başladı</a></li>
+          </ul>
+        </div>
+        """
+        ubys_items = parse_ubys_home_announcements(ubys_home_html, "https://ubys.kastamonu.edu.tr")
+        self.assertEqual(len(ubys_items), 1)
+        self.assertEqual(ubys_items[0].source, "ÜBYS")
+
+        seen_ids = {items[1].announcement_id}
+        filtered = filter_new_announcements(items, seen_ids=seen_ids, keywords=["sınav"])
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0].announcement_id, items[0].announcement_id)
+
+        msg = format_announcements(filtered)
+        self.assertIn("Yeni Duyuru Bildirimi", msg)
+        self.assertIn("[OİDB]", msg)
+
+
+class GpaProjectionTests(unittest.TestCase):
+    def test_gpa_honor_and_conditional_pass_projection(self) -> None:
+        courses = [
+            CourseGrade(
+                semester="2026 - Güz",
+                code="BPBZ201",
+                name="İnternet Programcılığı",
+                credit="4",
+                exams=[
+                    ExamGrade(exam_type="Ara Sınav", name="Vize", score="90", weight=0.40),
+                    ExamGrade(exam_type="Yarıyıl Sonu", name="Final", score="95", weight=0.60),
+                ],
+            ),
+            CourseGrade(
+                semester="2026 - Güz",
+                code="BPBZ203",
+                name="Görsel Programlama",
+                credit="4",
+                letter_grade="BA",
+            ),
+            CourseGrade(
+                semester="2026 - Güz",
+                code="BPBZ205",
+                name="Mesleki İngilizce",
+                credit="2",
+                letter_grade="AA",
+            ),
+        ]
+        proj = project_semester_gpa(courses, base_gano=3.10, base_credits=30.0)
+        # 4*4.0 + 4*3.5 + 2*4.0 = 38.0 / 10.0 = 3.80 YANO
+        self.assertEqual(proj.projected_yano, 3.80)
+        # (3.10*30 + 38.0) / 40 = 131 / 40 = 3.275 -> Python bankacı yuvarlamasıyla 3.27
+        self.assertEqual(proj.projected_gano, 3.27)
+        self.assertEqual(proj.honor_status, "yuksek_onur")
+
+        msg = format_gpa_projection(proj, "https://ubys.kastamonu.edu.tr")
+        self.assertIn("Yüksek Onur Belgesi", msg)
+        self.assertIn("3.80", msg)
+        self.assertIn("3.27", msg)
+
+        # DC koşullu geçme + FF varken onur belgesi olmamalı
+        risky_courses = [
+            CourseGrade(semester="2026 - Güz", code="D1", name="Ders 1", credit="4", letter_grade="DC"),
+            CourseGrade(semester="2026 - Güz", code="D2", name="Ders 2", credit="4", letter_grade="AA"),
+            CourseGrade(semester="2026 - Güz", code="D3", name="Ders 3", credit="2", letter_grade="FF"),
+        ]
+        risk_proj = project_semester_gpa(risky_courses, base_gano=1.80, base_credits=30.0)
+        self.assertTrue(risk_proj.has_failing_grade)
+        self.assertTrue(risk_proj.has_conditional_grade)
+        self.assertFalse(risk_proj.dc_pass_safe)
+        self.assertEqual(risk_proj.honor_status, "risk")
+        self.assertIn("DC/DD Koşullu Ders Uyarısı", format_gpa_projection(risk_proj, "https://ubys.kastamonu.edu.tr"))
+
+
+class ScheduleAndMaterialsTests(unittest.TestCase):
+    def test_weekly_schedule_exam_schedule_and_course_materials(self) -> None:
+        home_links = """
+        <a href="/AIS/Student/WeeklySchedule/Index?sapid=abc">Haftalık Ders Programı</a>
+        <a href="/AIS/Student/ExamSchedule/Index?sapid=abc">Sınav Takvimi</a>
+        """
+        self.assertEqual(parse_schedule_url(home_links), "/AIS/Student/WeeklySchedule/Index?sapid=abc")
+        self.assertEqual(parse_exam_schedule_url(home_links), "/AIS/Student/ExamSchedule/Index?sapid=abc")
+
+        grid_html = """
+        <table>
+          <thead><tr><th>Saat</th><th>Pazartesi</th><th>Salı</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>09:00 - 10:50</td>
+              <td>BPBZ201 İnternet Programcılığı<br/>Lab-2<br/>Dr. Rahime Çelik</td>
+              <td>-</td>
+            </tr>
+            <tr>
+              <td>13:00 - 14:50</td>
+              <td></td>
+              <td>BPBZ203 Görsel Programlama<br/>Amfi-1</td>
+            </tr>
+          </tbody>
+        </table>
+        """
+        slots = parse_weekly_schedule(grid_html)
+        self.assertEqual(len(slots), 2)
+        monday_slots = get_slots_for_day(slots, date(2026, 11, 23))
+        self.assertEqual(len(monday_slots), 1)
+        self.assertEqual(monday_slots[0].course_code, "BPBZ201")
+        self.assertEqual(monday_slots[0].classroom, "Lab-2")
+        self.assertIn("BPBZ201", format_daily_schedule(monday_slots, date(2026, 11, 23), "https://ubys.kastamonu.edu.tr"))
+        self.assertIn("Salı", format_weekly_schedule(slots, "https://ubys.kastamonu.edu.tr"))
+
+        # Base64 _jsm JSON formatı desteği
+        sched_jsm_b64 = base64.b64encode(
+            json.dumps(
+                [
+                    {
+                        "DayOfWeek": 3,
+                        "CourseCode": "BPBZ207",
+                        "CourseName": "Bilgisayar Ağları",
+                        "StartTime": "11:00",
+                        "EndTime": "12:50",
+                        "Classroom": "D-102",
+                    }
+                ]
+            ).encode("utf-8")
+        ).decode("ascii")
+        jsm_slots = parse_weekly_schedule(f'<script>var _jsm = JSON.parse(Base64.decode("{sched_jsm_b64}"));</script>')
+        self.assertEqual(len(jsm_slots), 1)
+        self.assertEqual(jsm_slots[0].day_name, "Çarşamba")
+        self.assertEqual(jsm_slots[0].classroom, "D-102")
+
+        exam_html = """
+        <table>
+          <thead><tr><th>Ders Kodu</th><th>Ders Adı</th><th>Sınav Türü</th><th>Tarih</th><th>Saat</th><th>Derslik</th><th>Sıra</th></tr></thead>
+          <tbody>
+            <tr><td>BPBZ201</td><td>İnternet Programcılığı</td><td>Ara Sınav</td><td>24.11.2026</td><td>10:00</td><td>KMYO-Z04</td><td>12</td></tr>
+            <tr><td>BPBZ203</td><td>Görsel Programlama</td><td>Ara Sınav</td><td>26.11.2026</td><td>14:00</td><td>Lab-1</td><td>-</td></tr>
+          </tbody>
+        </table>
+        """
+        exams = parse_exam_schedule(exam_html)
+        self.assertEqual(len(exams), 2)
+        today = date(2026, 11, 23)
+        reminders = find_exam_reminders(exams, today, [7, 3, 1, 0], sent_keys={})
+        # 24.11 -> 1 gün kaldı, 26.11 -> 3 gün kaldı
+        self.assertEqual(len(reminders), 2)
+        self.assertEqual(reminders[0][1], 1)
+        self.assertEqual(reminders[1][1], 3)
+        sent = {exam_reminder_key(reminders[0][0], 1): "2026-11-23"}
+        reminders2 = find_exam_reminders(exams, today, [7, 3, 1, 0], sent_keys=sent)
+        self.assertEqual(len(reminders2), 1)
+
+        rem_msg = format_exam_reminders(reminders, "https://ubys.kastamonu.edu.tr")
+        self.assertIn("YARIN SINAV VAR", rem_msg)
+        self.assertIn("KMYO-Z04", rem_msg)
+        self.assertIn("ÜBYS Sınav Takvimi", format_exam_schedule(exams, today, "https://ubys.kastamonu.edu.tr"))
+
+        material_html = """
+        <a href="/AIS/Student/Class/DownloadFile?id=99">Hafta_07_Sunum.pdf</a>
+        <table>
+          <thead><tr><th>Ödev Başlığı</th><th>Son Teslim Tarihi</th></tr></thead>
+          <tbody>
+            <tr><td>PHP CRUD Projesi</td><td>30.11.2026</td></tr>
+          </tbody>
+        </table>
+        """
+        detail = parse_class_detail(
+            material_html,
+            course_code="BPBZ201",
+            course_name="İnternet Programcılığı",
+            base_url="https://ubys.kastamonu.edu.tr",
+        )
+        mats = detail["materials"]
+        self.assertEqual(len(mats), 2)
+        mat_msg = format_material_alerts(mats, "https://ubys.kastamonu.edu.tr")
+        self.assertIn("Hafta_07_Sunum.pdf", mat_msg)
+        self.assertIn("30.11.2026", mat_msg)
+
+
+class TelegramCommandsAndBriefingTests(unittest.TestCase):
+    def test_command_parser_auth_filter_and_config_env(self) -> None:
+        self.assertEqual(parse_bot_command("/hesapla@KastamonuBot 80 30/70"), ("hesapla", ["80", "30/70"]))
+        self.assertEqual(parse_bot_command("/devamsızlık"), ("devamsizlik", []))
+        self.assertEqual(parse_bot_command("/bilinmeyen"), (None, []))
+
+        env = {
+            "UBYS_USERNAME": "221234567",
+            "UBYS_PASSWORD": "secret",
+            "TELEGRAM_BOT_TOKEN": "123:ABC",
+            "TELEGRAM_CHAT_ID": "12345",
+            "ANNOUNCEMENT_URLS": "KMYO|https://kmyo.kastamonu.edu.tr/, https://mf.kastamonu.edu.tr/",
+            "ANNOUNCEMENT_KEYWORDS": "burs, sınav, staj",
+            "EXAM_REMINDER_DAYS": "5,2,0",
+            "WEEKLY_BRIEFING_HOUR": "21",
+            "ENABLE_COMMANDS": "false",
+            "WEATHER_LOCATION": "Merkez Kampüs",
+        }
+        with patch("src.config.load_dotenv", None), patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        self.assertEqual(
+            cfg.announcement_urls,
+            [("KMYO", "https://kmyo.kastamonu.edu.tr"), ("MF", "https://mf.kastamonu.edu.tr")],
+        )
+        self.assertEqual(cfg.announcement_keywords, ["burs", "sınav", "staj"])
+        self.assertEqual(cfg.exam_reminder_days, [5, 2, 0])
+        self.assertEqual(cfg.weekly_briefing_hour, 21)
+        self.assertFalse(cfg.enable_commands)
+        self.assertEqual(cfg.weather_location, "Merkez Kampüs")
+
+        reply_help = handle_command("yardim", [], cfg, {})
+        self.assertIn("/hesapla", reply_help)
+        reply_calc = handle_command("hesapla", ["80", "30/70"], cfg, {})
+        self.assertIn("%30", reply_calc)
+        self.assertIn("BA", reply_calc)
+
+        # process_telegram_commands yalnızca yetkili TELEGRAM_CHAT_ID'yi yanıtlamalı
+        mock_notifier = MagicMock()
+        mock_notifier.set_my_commands.return_value = True
+        mock_notifier.get_updates.return_value = [
+            {"update_id": 100, "message": {"chat": {"id": 99999}, "text": "/yardim"}},
+            {"update_id": 101, "message": {"chat": {"id": 12345}, "text": "/hesapla 85"}},
+        ]
+        swiss_state: dict[str, object] = {}
+        handled, dirty = process_telegram_commands(
+            cfg,
+            swiss_state,
+            {"today": date(2026, 11, 23)},
+            notifier_factory=lambda: mock_notifier,
+        )
+        self.assertEqual(handled, 1)
+        self.assertTrue(dirty)
+        self.assertEqual(swiss_state["telegram_commands_version"], BOT_COMMANDS_VERSION)
+        self.assertEqual(swiss_state["telegram_last_update_id"], 101)
+        mock_notifier.send_message.assert_called_once()
+        self.assertEqual(mock_notifier.send_message.call_args.kwargs["chat_ids_override"], ["12345"])
+
+        # Haftalık Pazar brifingi formatlama kontrolü
+        briefing_msg = format_weekly_briefing(
+            today=date(2026, 11, 22),
+            ongoing_cal=[],
+            upcoming_cal=[],
+            exams=[
+                ExamScheduleItem(
+                    course_code="BPBZ201",
+                    course_name="İnternet Programcılığı",
+                    exam_type="Ara Sınav",
+                    exam_date=date(2026, 11, 25),
+                    exam_time="10:00",
+                    classroom="Lab-1",
+                )
+            ],
+            attendance_reports=[],
+            gpa_projection=None,
+            weather=None,
+            base_url="https://ubys.kastamonu.edu.tr",
+        )
+        self.assertIn("Haftalık Kastamonu ÜBYS Öğrenci Özeti", briefing_msg)
+        self.assertIn("BPBZ201", briefing_msg)
 
 
 if __name__ == "__main__":

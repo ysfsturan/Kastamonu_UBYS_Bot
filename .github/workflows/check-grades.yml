@@ -17,10 +17,17 @@ on:
         options:
           - once
           - test_all
+          - attendance
+          - transcript
+          - gpa
+          - schedule
+          - exams
+          - announcements
+          - weather
           - dining
           - calendar
-          - transcript
-          - attendance
+          - briefing
+          - commands
           - force_daily
       test_notify:
         description: "Telegram'a test bildirimi gönder (once ile test_all çalıştırır; diğer kiplerde bildirimi açar)"
@@ -79,6 +86,21 @@ jobs:
           CALENDAR_CATEGORIES: ${{ vars.CALENDAR_CATEGORIES }}
           CALENDAR_REMINDER_DAYS: ${{ vars.CALENDAR_REMINDER_DAYS }}
           DINING_NOTIFY_HOUR: ${{ vars.DINING_NOTIFY_HOUR }}
+          ENABLE_WEATHER: ${{ vars.ENABLE_WEATHER }}
+          WEATHER_LAT: ${{ vars.WEATHER_LAT }}
+          WEATHER_LON: ${{ vars.WEATHER_LON }}
+          WEATHER_LOCATION: ${{ vars.WEATHER_LOCATION }}
+          ENABLE_ANNOUNCEMENTS: ${{ vars.ENABLE_ANNOUNCEMENTS }}
+          ANNOUNCEMENT_URLS: ${{ vars.ANNOUNCEMENT_URLS }}
+          ANNOUNCEMENT_KEYWORDS: ${{ vars.ANNOUNCEMENT_KEYWORDS }}
+          ENABLE_SCHEDULE: ${{ vars.ENABLE_SCHEDULE }}
+          ENABLE_EXAM_SCHEDULE: ${{ vars.ENABLE_EXAM_SCHEDULE }}
+          SCHEDULE_NOTIFY_HOUR: ${{ vars.SCHEDULE_NOTIFY_HOUR }}
+          EXAM_REMINDER_DAYS: ${{ vars.EXAM_REMINDER_DAYS }}
+          ENABLE_MATERIALS: ${{ vars.ENABLE_MATERIALS }}
+          ENABLE_WEEKLY_BRIEFING: ${{ vars.ENABLE_WEEKLY_BRIEFING }}
+          WEEKLY_BRIEFING_HOUR: ${{ vars.WEEKLY_BRIEFING_HOUR }}
+          ENABLE_COMMANDS: ${{ vars.ENABLE_COMMANDS }}
           ALL_SEMESTERS: ${{ vars.ALL_SEMESTERS }}
           UBYS_USER_GROUP_ID: ${{ vars.UBYS_USER_GROUP_ID }}
           NOTIFY_ON_FIRST_RUN: ${{ vars.NOTIFY_ON_FIRST_RUN }}
@@ -89,38 +111,37 @@ jobs:
             MODE="once"
           fi
 
+          FLAG=""
+          if [ "$NOTIFY" = "true" ]; then
+            FLAG="--notify-test"
+          fi
+
           if [ "$MODE" = "once" ] && [ "$NOTIFY" = "true" ]; then
             python -m src.main --test --notify-test
           elif [ "$MODE" = "test_all" ]; then
-            if [ "$NOTIFY" = "true" ]; then
-              python -m src.main --test --notify-test
-            else
-              python -m src.main --test
-            fi
+            python -m src.main --test $FLAG
           elif [ "$MODE" = "dining" ]; then
-            if [ "$NOTIFY" = "true" ]; then
-              python -m src.main --dining --notify-test
-            else
-              python -m src.main --dining
-            fi
+            python -m src.main --dining $FLAG
           elif [ "$MODE" = "calendar" ]; then
-            if [ "$NOTIFY" = "true" ]; then
-              python -m src.main --calendar --notify-test
-            else
-              python -m src.main --calendar
-            fi
+            python -m src.main --calendar $FLAG
           elif [ "$MODE" = "transcript" ]; then
-            if [ "$NOTIFY" = "true" ]; then
-              python -m src.main --transcript --notify-test
-            else
-              python -m src.main --transcript
-            fi
+            python -m src.main --transcript $FLAG
           elif [ "$MODE" = "attendance" ]; then
-            if [ "$NOTIFY" = "true" ]; then
-              python -m src.main --attendance --notify-test
-            else
-              python -m src.main --attendance
-            fi
+            python -m src.main --attendance $FLAG
+          elif [ "$MODE" = "gpa" ]; then
+            python -m src.main --gpa $FLAG
+          elif [ "$MODE" = "schedule" ]; then
+            python -m src.main --schedule $FLAG
+          elif [ "$MODE" = "exams" ]; then
+            python -m src.main --exams $FLAG
+          elif [ "$MODE" = "announcements" ]; then
+            python -m src.main --announcements $FLAG
+          elif [ "$MODE" = "weather" ]; then
+            python -m src.main --weather $FLAG
+          elif [ "$MODE" = "briefing" ]; then
+            python -m src.main --briefing $FLAG
+          elif [ "$MODE" = "commands" ]; then
+            python -m src.main --commands
           elif [ "$MODE" = "force_daily" ]; then
             python -m src.main --once --force-daily
           else

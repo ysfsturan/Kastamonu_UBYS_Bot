@@ -10,7 +10,15 @@ from urllib.parse import quote, urljoin
 
 import httpx
 
-from .models import CourseGrade, TranscriptSummary
+from .models import (
+    Announcement,
+    CourseGrade,
+    CourseMaterial,
+    ExamScheduleItem,
+    ScheduleSlot,
+    TranscriptSummary,
+)
+from .schedule import parse_exam_schedule, parse_weekly_schedule
 from .ubys_parser import (
     ParseError,
     SessionExpiredError,
@@ -21,12 +29,16 @@ from .ubys_parser import (
     is_login_page,
     parse_attendance_partial,
     parse_class_detail,
+    parse_course_materials,
+    parse_exam_schedule_url,
     parse_grades_index,
     parse_sap_id,
+    parse_schedule_url,
     parse_student_gano,
     parse_student_program_hints,
     parse_transcript,
     parse_transcript_url,
+    parse_ubys_home_announcements,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +94,9 @@ class UBYSClient:
         self._sap_id: Optional[str] = None
         self._last_home_gano: Optional[float] = None
         self._transcript_url: Optional[str] = None
+        self._schedule_url: Optional[str] = None
+        self._exam_schedule_url: Optional[str] = None
+        self._home_announcements: list[Announcement] = []
         self._program_hints: list[str] = []
 
     @property
@@ -93,6 +108,11 @@ class UBYSClient:
     def student_program_hints(self) -> list[str]:
         """Öğrencinin kayıtlı program/bölüm ipuçlarını döndürür."""
         return list(self._program_hints)
+
+    @property
+    def home_announcements(self) -> list[Announcement]:
+        """Öğrenci ana sayfasından okunan ÜBYS duyurularını döndürür."""
+        return list(self._home_announcements)
 
     def __enter__(self) -> UBYSClient:
         return self
@@ -106,6 +126,9 @@ class UBYSClient:
         self._sap_id = None
         self._last_home_gano = None
         self._transcript_url = None
+        self._schedule_url = None
+        self._exam_schedule_url = None
+        self._home_announcements = []
         self._program_hints = []
 
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
@@ -262,6 +285,9 @@ class UBYSClient:
         self._sap_id = parse_sap_id(home_resp.text)
         self._last_home_gano = parse_student_gano(home_resp.text)
         self._transcript_url = parse_transcript_url(home_resp.text)
+        self._schedule_url = parse_schedule_url(home_resp.text)
+        self._exam_schedule_url = parse_exam_schedule_url(home_resp.text)
+        self._home_announcements = parse_ubys_home_announcements(home_resp.text, self.base_url)
         self._program_hints = parse_student_program_hints(home_resp.text)
         return home_resp.text
 
@@ -272,6 +298,7 @@ class UBYSClient:
         request_delay: float = 0.7,
         dump_dir: Optional[Path] = None,
         fetch_attendance_partials: bool = True,
+        fetch_materials: bool = True,
     ) -> list[CourseGrade]:
         """Öğrenci dönem derslerini, sınav detaylarını ve devamsızlık verilerini çeker."""
         if not self._logged_in:
@@ -346,7 +373,12 @@ class UBYSClient:
                         (dump_dir / "class_detail_sample.html").write_text(detail_resp.text, encoding="utf-8")
                         dumped_detail = True
 
-                    detail = parse_class_detail(detail_resp.text)
+                    detail = parse_class_detail(
+                        detail_resp.text,
+                        course_code=course.code,
+                        course_name=course.name,
+                        base_url=self.base_url,
+                    )
                     if detail["exams"]:
                         course.exams = detail["exams"]
                     if not course.letter_grade and detail["letter_grade"]:
@@ -356,6 +388,12 @@ class UBYSClient:
                     if detail["class_average"]:
                         course.class_average = detail["class_average"]
                     self._merge_attendance_fields(course, detail.get("attendance"))
+
+                    seen_mat_ids: set[str] = {m.material_id for m in course.materials}
+                    for mat in detail.get("materials") or []:
+                        if isinstance(mat, CourseMaterial) and mat.material_id not in seen_mat_ids:
+                            seen_mat_ids.add(mat.material_id)
+                            course.materials.append(mat)
 
                     partial_url = detail.get("attendance_partial_url")
                     if (
@@ -373,6 +411,26 @@ class UBYSClient:
                                 self._merge_attendance_fields(course, parse_attendance_partial(p_resp.text))
                         except Exception as p_exc:
                             logger.debug("Devamsızlık alt sekmesi okunamadı (%s): %s", course.code, p_exc)
+
+                    if fetch_materials:
+                        for m_url in (detail.get("material_partial_urls") or [])[:3]:
+                            try:
+                                if request_delay > 0:
+                                    time.sleep(min(0.2, request_delay))
+                                resolved_mat = urljoin(f"{self.base_url}/", str(m_url))
+                                m_resp = self._request("GET", resolved_mat)
+                                if m_resp.status_code < 400 and not is_login_page(m_resp.text, str(m_resp.url)):
+                                    for mat in parse_course_materials(
+                                        m_resp.text,
+                                        course_code=course.code,
+                                        course_name=course.name,
+                                        base_url=self.base_url,
+                                    ):
+                                        if mat.material_id not in seen_mat_ids:
+                                            seen_mat_ids.add(mat.material_id)
+                                            course.materials.append(mat)
+                            except Exception as m_exc:
+                                logger.debug("Materyal sekmesi okunamadı (%s): %s", course.code, m_exc)
                 except SessionExpiredError:
                     raise
                 except Exception as exc:
@@ -431,6 +489,93 @@ class UBYSClient:
         if last_status is not None and last_status >= 400:
             raise NetworkError(f"Transkript sayfası açılamadı: HTTP {last_status}")
         return TranscriptSummary(gano=self._last_home_gano)
+
+    def _build_candidate_urls(self, discovered: Optional[str], relative_paths: list[str]) -> list[str]:
+        candidates: list[str] = []
+        if discovered:
+            candidates.append(urljoin(f"{self.base_url}/", discovered))
+        sap_q = quote(self._sap_id, safe="") if self._sap_id else None
+        for path in relative_paths:
+            if sap_q:
+                candidates.append(f"{self.base_url}{path}?sapId={sap_q}")
+            candidates.append(f"{self.base_url}{path}")
+        seen: set[str] = set()
+        unique: list[str] = []
+        for u in candidates:
+            if u not in seen:
+                seen.add(u)
+                unique.append(u)
+        return unique
+
+    def fetch_weekly_schedule(self, dump_dir: Optional[Path] = None) -> list[ScheduleSlot]:
+        """Öğrencinin haftalık ders programını çeker; bulunamazsa boş liste döner."""
+        if not self._logged_in:
+            raise SessionExpiredError("Önce login() çağrılmalıdır.")
+        if self._schedule_url is None and self._sap_id is None:
+            self._fetch_home_metadata(dump_dir=dump_dir)
+
+        urls = self._build_candidate_urls(
+            self._schedule_url,
+            [
+                "/AIS/Student/WeeklySchedule/Index",
+                "/AIS/Student/CourseSchedule/Index",
+                "/AIS/Student/Class/WeeklySchedule",
+                "/AIS/Student/DersProgrami/Index",
+            ],
+        )
+        for url in urls:
+            try:
+                resp = self._request("GET", url)
+                if is_login_page(resp.text, str(resp.url)):
+                    raise SessionExpiredError("Ders programı alınırken oturum düştü.")
+                if resp.status_code >= 400:
+                    continue
+                if dump_dir is not None:
+                    dump_dir.mkdir(parents=True, exist_ok=True)
+                    (dump_dir / "weekly_schedule.html").write_text(resp.text, encoding="utf-8")
+                slots = parse_weekly_schedule(resp.text)
+                if slots:
+                    return slots
+            except SessionExpiredError:
+                raise
+            except Exception as exc:
+                logger.debug("Ders programı denemesi başarısız: %s", exc)
+        return []
+
+    def fetch_exam_schedule(self, dump_dir: Optional[Path] = None) -> list[ExamScheduleItem]:
+        """Öğrencinin vize/final sınav programını çeker; bulunamazsa boş liste döner."""
+        if not self._logged_in:
+            raise SessionExpiredError("Önce login() çağrılmalıdır.")
+        if self._exam_schedule_url is None and self._sap_id is None:
+            self._fetch_home_metadata(dump_dir=dump_dir)
+
+        urls = self._build_candidate_urls(
+            self._exam_schedule_url,
+            [
+                "/AIS/Student/ExamSchedule/Index",
+                "/AIS/Student/ExamCalendar/Index",
+                "/AIS/Student/Exam/ExamSchedule",
+                "/AIS/Student/Class/ExamSchedule",
+            ],
+        )
+        for url in urls:
+            try:
+                resp = self._request("GET", url)
+                if is_login_page(resp.text, str(resp.url)):
+                    raise SessionExpiredError("Sınav takvimi alınırken oturum düştü.")
+                if resp.status_code >= 400:
+                    continue
+                if dump_dir is not None:
+                    dump_dir.mkdir(parents=True, exist_ok=True)
+                    (dump_dir / "exam_schedule.html").write_text(resp.text, encoding="utf-8")
+                exams = parse_exam_schedule(resp.text)
+                if exams:
+                    return exams
+            except SessionExpiredError:
+                raise
+            except Exception as exc:
+                logger.debug("Sınav takvimi denemesi başarısız: %s", exc)
+        return []
 
 
 def _safe_int(value: Any) -> Optional[int]:

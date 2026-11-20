@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Any, Optional
 
 from .models import (
     CourseGrade,
     ExamGrade,
     FinalTarget,
+    GpaProjection,
     GradeEstimate,
     GradeTargetAnalysis,
 )
@@ -265,3 +266,127 @@ def analyze_course_grades(
         )
 
     return None, estimate_course_grade(midterm_score, end_score, mw, fw, final_min_score)
+
+
+LETTER_COEFFICIENTS: dict[str, float] = {
+    "AA": 4.00,
+    "BA": 3.50,
+    "BB": 3.00,
+    "CB": 2.50,
+    "CC": 2.00,
+    "DC": 1.50,
+    "DD": 1.00,
+    "FD": 0.50,
+    "FF": 0.00,
+    "DZ": 0.00,
+}
+
+
+def project_semester_gpa(
+    courses: list[CourseGrade],
+    base_gano: Optional[float] = None,
+    base_credits: Optional[float] = None,
+    default_midterm_weight: float = 0.40,
+    default_final_weight: float = 0.60,
+    final_min_score: int = 0,
+) -> GpaProjection:
+    """Açıklanan veya vize+finalden tahmin edilen notlara göre dönem YANO, GANO ve onur durumunu hesaplar."""
+    counted: list[dict[str, Any]] = []
+    total_term_credit = 0.0
+    total_term_points = 0.0
+    has_failing = False
+    has_conditional = False
+
+    for course in courses:
+        credit = _parse_numeric_score(course.credit)
+        if credit is None or credit <= 0:
+            continue
+
+        official = str(course.letter_grade or "").strip().upper()
+        letter: Optional[str] = None
+        coeff: Optional[float] = None
+        source = ""
+
+        if official in LETTER_COEFFICIENTS:
+            letter = official
+            coeff = LETTER_COEFFICIENTS[official]
+            source = "resmi"
+        else:
+            _, estimate = analyze_course_grades(
+                course,
+                default_midterm_weight=default_midterm_weight,
+                default_final_weight=default_final_weight,
+                final_min_score=final_min_score,
+            )
+            if estimate is not None and estimate.letter_grade in LETTER_COEFFICIENTS:
+                letter = estimate.letter_grade
+                coeff = estimate.coefficient
+                source = "tahmini"
+
+        if letter is None or coeff is None:
+            continue
+
+        total_term_credit += credit
+        total_term_points += credit * coeff
+        if letter in {"FF", "FD", "DZ"}:
+            has_failing = True
+        if letter in {"DC", "DD"}:
+            has_conditional = True
+
+        counted.append(
+            {
+                "code": course.code,
+                "name": course.name,
+                "credit": credit,
+                "letter": letter,
+                "coefficient": coeff,
+                "source": source,
+            }
+        )
+
+    projected_yano: Optional[float] = None
+    if total_term_credit > 0:
+        projected_yano = round(total_term_points / total_term_credit, 2)
+
+    projected_gano: Optional[float] = None
+    if projected_yano is not None:
+        if base_gano is not None and base_credits is not None and base_credits > 0:
+            prev_points = base_gano * base_credits
+            projected_gano = round((prev_points + total_term_points) / (base_credits + total_term_credit), 2)
+        else:
+            projected_gano = projected_yano
+
+    if projected_gano is not None and projected_gano < 2.00:
+        honor_status = "risk"
+    elif projected_yano is not None and not has_failing and projected_yano >= 3.50:
+        honor_status = "yuksek_onur"
+    elif projected_yano is not None and not has_failing and projected_yano >= 3.00:
+        honor_status = "onur"
+    else:
+        honor_status = "normal"
+
+    dc_pass_safe: Optional[bool] = None
+    if has_conditional and projected_gano is not None:
+        dc_pass_safe = projected_gano >= 2.00
+
+    points_to_honor: Optional[float] = None
+    points_to_high_honor: Optional[float] = None
+    if projected_yano is not None and not has_failing:
+        if projected_yano < 3.00:
+            points_to_honor = round(3.00 - projected_yano, 2)
+        if projected_yano < 3.50:
+            points_to_high_honor = round(3.50 - projected_yano, 2)
+
+    return GpaProjection(
+        projected_yano=projected_yano,
+        projected_gano=projected_gano,
+        current_gano=base_gano,
+        total_term_credit=round(total_term_credit, 2),
+        counted_courses=counted,
+        has_failing_grade=has_failing,
+        has_conditional_grade=has_conditional,
+        honor_status=honor_status,
+        dc_pass_safe=dc_pass_safe,
+        points_to_honor=points_to_honor,
+        points_to_high_honor=points_to_high_honor,
+    )

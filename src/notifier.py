@@ -13,13 +13,19 @@ import httpx
 
 from .grade_calculator import analyze_course_grades, resolve_course_weights
 from .models import (
+    Announcement,
     AttendanceReport,
     CalendarEvent,
     CourseGrade,
+    CourseMaterial,
     DailyMenu,
+    ExamScheduleItem,
+    GpaProjection,
     GradeChange,
     GradeTargetAnalysis,
+    ScheduleSlot,
     TranscriptSummary,
+    WeatherForecast,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,23 +101,38 @@ class TelegramNotifier:
         self.max_retries = max(1, max_retries)
         self.retry_delay = max(0.0, retry_delay)
 
-    def send_message(self, text: str) -> None:
-        """Mesajı yapılandırılmış tüm Telegram sohbetlerine IPv4 ve yeniden denemeyle gönderir."""
+    def _build_client(self, timeout_override: Optional[float] = None) -> httpx.Client:
+        eff_timeout = timeout_override if timeout_override is not None else self.timeout
+        client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(eff_timeout, connect=min(15.0, eff_timeout)),
+        }
+        transport = _build_ipv4_transport()
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        return httpx.Client(**client_kwargs)
+
+    def send_message(
+        self,
+        text: str,
+        chat_ids_override: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Mesajı yapılandırılmış veya belirtilen Telegram sohbetlerine IPv4 ve yeniden denemeyle gönderir."""
         if not text.strip():
+            return
+
+        targets = (
+            [str(cid).strip() for cid in chat_ids_override if str(cid).strip()]
+            if chat_ids_override is not None
+            else self.chat_ids
+        )
+        if not targets:
             return
 
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         chunks = split_message(text)
 
-        client_kwargs: dict[str, Any] = {
-            "timeout": httpx.Timeout(self.timeout, connect=min(15.0, self.timeout)),
-        }
-        transport = _build_ipv4_transport()
-        if transport is not None:
-            client_kwargs["transport"] = transport
-
-        with httpx.Client(**client_kwargs) as client:
-            for chat_id in self.chat_ids:
+        with self._build_client() as client:
+            for chat_id in targets:
                 for chunk in chunks:
                     payload = {
                         "chat_id": chat_id,
@@ -120,6 +141,58 @@ class TelegramNotifier:
                         "disable_web_page_preview": True,
                     }
                     self._post_chunk_with_retry(client, url, chat_id, payload)
+
+    def get_updates(
+        self,
+        offset: Optional[int] = None,
+        timeout_seconds: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Bot hesabına gelen güncellemeleri (getUpdates) IPv4 üzerinden çeker."""
+        url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+        params: dict[str, Any] = {
+            "timeout": max(0, int(timeout_seconds)),
+            "allowed_updates": ["message"],
+        }
+        if offset is not None:
+            params["offset"] = int(offset)
+
+        req_timeout = max(self.timeout, float(timeout_seconds) + 15.0)
+        with self._build_client(timeout_override=req_timeout) as client:
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    response = client.post(url, json=params)
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    if attempt >= self.max_retries:
+                        raise
+                    wait_seconds = self.retry_delay * attempt
+                    if wait_seconds > 0:
+                        time.sleep(wait_seconds)
+                    continue
+
+                if response.status_code >= 400:
+                    desc = _extract_telegram_error(response)
+                    raise RuntimeError(f"Telegram getUpdates hatası (HTTP {response.status_code}): {desc}")
+
+                data = response.json()
+                if not data.get("ok"):
+                    raise RuntimeError(f"Telegram getUpdates hatası: {data.get('description', data)}")
+                raw_results = data.get("result") or []
+                return [u for u in raw_results if isinstance(u, dict)]
+        return []
+
+    def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
+        """Telegram sohbet menüsü için bot komut listesini (setMyCommands) kaydeder."""
+        url = f"https://api.telegram.org/bot{self.bot_token}/setMyCommands"
+        try:
+            with self._build_client() as client:
+                resp = client.post(url, json={"commands": commands})
+                if resp.status_code >= 400:
+                    return False
+                data = resp.json()
+                return bool(data.get("ok"))
+        except Exception as exc:
+            logger.debug("Telegram komut menüsü kaydedilemedi: %s", exc)
+            return False
 
     def _post_chunk_with_retry(
         self,
@@ -395,8 +468,30 @@ def _calendar_event_icon(event: CalendarEvent) -> str:
     return "📅"
 
 
-def format_daily_menu(menu: DailyMenu, is_next_preview: bool = False) -> str:
-    """Günlük yemekhane menüsünü Telegram HTML mesajına dönüştürür."""
+def _format_weather_inline_lines(weather: WeatherForecast) -> list[str]:
+    temp_range = (
+        f"{weather.temp_min:.0f}° / {weather.temp_max:.0f}°C"
+        if (weather.temp_min is not None and weather.temp_max is not None)
+        else (f"{weather.current_temp:.0f}°C" if weather.current_temp is not None else "-")
+    )
+    extra_parts: list[str] = []
+    if weather.precip_probability is not None:
+        extra_parts.append(f"Yağış %{weather.precip_probability}")
+    if weather.wind_speed is not None:
+        extra_parts.append(f"Rüzgâr {weather.wind_speed:.0f} km/sa")
+    extra_txt = f" ({', '.join(extra_parts)})" if extra_parts else ""
+    return [
+        f"{weather.condition_icon} <b>{html.escape(weather.location_name)}:</b> {html.escape(weather.condition_text)}, <code>{html.escape(temp_range)}</code>{html.escape(extra_txt)}",
+        f"🧥 <i>{html.escape(weather.advice)}</i>",
+    ]
+
+
+def format_daily_menu(
+    menu: DailyMenu,
+    is_next_preview: bool = False,
+    weather: Optional[WeatherForecast] = None,
+) -> str:
+    """Günlük yemekhane menüsünü (varsa hava durumu özetiyle) Telegram HTML mesajına dönüştürür."""
     header = "🍽️ <b>Yaklaşan İlk Yemekhane Menüsü</b>" if is_next_preview else "🍽️ <b>Günün Yemekhane Menüsü</b>"
     lines: list[str] = [
         header,
@@ -417,6 +512,10 @@ def format_daily_menu(menu: DailyMenu, is_next_preview: bool = False) -> str:
             lines.append(
                 f"🔥 <b>Toplam Kalori:</b> ~<code>{menu.total_calories_min}–{menu.total_calories_max} kkal</code>"
             )
+
+    if weather is not None:
+        lines.append("")
+        lines.extend(_format_weather_inline_lines(weather))
 
     source_url = menu.source_url or "https://sks.kastamonu.edu.tr/"
     lines.append("")
@@ -758,3 +857,295 @@ def format_attendance_alerts(
 
     lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
     return "\n".join(lines)
+
+
+def format_weather_report(weather: WeatherForecast) -> str:
+    """Kastamonu / Kuzeykent hava durumu raporunu Telegram HTML formatında üretir."""
+    lines = [
+        f"{weather.condition_icon} <b>{html.escape(weather.location_name)} Hava Durumu</b>",
+        f"📅 <i>{html.escape(format_tr_date(weather.forecast_date))}</i>",
+        "",
+        f"🌡️ <b>Durum:</b> {html.escape(weather.condition_text)}",
+    ]
+    if weather.current_temp is not None:
+        app_txt = f" (Hissedilen: {weather.apparent_temp:.0f}°C)" if weather.apparent_temp is not None else ""
+        lines.append(f"🌡️ <b>Şu An:</b> <code>{weather.current_temp:.1f}°C</code>{html.escape(app_txt)}")
+    if weather.temp_min is not None and weather.temp_max is not None:
+        lines.append(f"↕️ <b>Günlük En Düşük / Yüksek:</b> <code>{weather.temp_min:.0f}° / {weather.temp_max:.0f}°C</code>")
+    if weather.precip_probability is not None:
+        lines.append(f"☔ <b>Yağış İhtimali:</b> <code>%{weather.precip_probability}</code>")
+    if weather.wind_speed is not None:
+        lines.append(f"💨 <b>Rüzgâr:</b> <code>{weather.wind_speed:.0f} km/sa</code>")
+    lines.append(f"🧥 <b>Tavsiye:</b> <i>{html.escape(weather.advice)}</i>")
+
+    if weather.daily_summaries:
+        lines.append("")
+        lines.append("📆 <b>3 Günlük Görünüm:</b>")
+        for s in weather.daily_summaries:
+            lines.append(f"• {html.escape(s)}")
+
+    return "\n".join(lines)
+
+
+def format_announcements(announcements: list[Announcement], is_preview: bool = False) -> str:
+    """Üniversite / OİDB / SKS / Fakülte / ÜBYS duyurularını Telegram HTML mesajına çevirir."""
+    header = "📢 <b>Kastamonu Üniversitesi Güncel Duyurular</b>" if is_preview else "📢 <b>Yeni Duyuru Bildirimi</b>"
+    lines = [header, ""]
+    if not announcements:
+        lines.append("Gösterilecek duyuru bulunamadı.")
+        return "\n".join(lines)
+
+    for item in announcements[:15]:
+        date_tag = f" ({html.escape(item.published_date)})" if item.published_date else ""
+        lines.append(f"🏷️ <b>[{html.escape(item.source)}]</b>{date_tag}")
+        lines.append(f'• <a href="{html.escape(item.url, quote=True)}">{html.escape(item.title)}</a>')
+        if item.summary:
+            lines.append(f"  <i>{html.escape(item.summary)}</i>")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def format_gpa_projection(projection: GpaProjection, base_url: str) -> str:
+    """Tahmini YANO/GANO ve onur belgesi projeksiyonunu Telegram HTML mesajına çevirir."""
+    lines = ["📊 <b>Dönem Sonu YANO / GANO Projeksiyonu</b>", ""]
+    if projection.projected_yano is None:
+        lines.append("Henüz YANO/GANO hesabı için girilmiş geçme harfi veya vize+final notu yok.")
+        lines.append("")
+        lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+        return "\n".join(lines)
+
+    lines.append(f"📈 <b>Tahmini Dönem Ortalaması (YANO):</b> <code>{projection.projected_yano:.2f}</code> (Kredi: <code>{projection.total_term_credit:g}</code>)")
+    if projection.projected_gano is not None:
+        prev_txt = f" (Önceki: <code>{projection.current_gano:.2f}</code>)" if projection.current_gano is not None else ""
+        lines.append(f"🎓 <b>Tahmini Genel Ortalama (GANO):</b> <code>{projection.projected_gano:.2f}</code>{prev_txt}")
+
+    status_map = {
+        "yuksek_onur": "🏆 <b>Yüksek Onur Belgesi (≥3.50)</b> bandındasın!",
+        "onur": "🏅 <b>Onur Belgesi (≥3.00)</b> bandındasın!",
+        "risk": "⚠️ <b>Dikkat:</b> GANO 2.00 sınırının altında görünüyor.",
+        "normal": "📘 Normal başarı bandındasın.",
+    }
+    lines.append(status_map.get(projection.honor_status, ""))
+
+    if projection.has_conditional_grade and projection.dc_pass_safe is not None:
+        if projection.dc_pass_safe:
+            lines.append("✅ <b>DC/DD Koşullu Ders:</b> GANO ≥ 2.00 olduğu için geçme güvenli görünüyor.")
+        else:
+            lines.append("🚨 <b>DC/DD Koşullu Ders Uyarısı:</b> GANO < 2.00 olursa koşullu dersler kalabilir.")
+
+    if not projection.has_failing_grade:
+        if projection.points_to_honor and projection.points_to_honor > 0:
+            lines.append(f"ℹ️ Onur Belgesi (3.00) için dönem ortalamana <code>+{projection.points_to_honor:.2f}</code> puan gerekiyor.")
+        elif projection.points_to_high_honor and projection.points_to_high_honor > 0:
+            lines.append(f"ℹ️ Yüksek Onur (3.50) için dönem ortalamana <code>+{projection.points_to_high_honor:.2f}</code> puan gerekiyor.")
+
+    if projection.counted_courses:
+        lines.append("")
+        lines.append("📚 <b>Hesaba Katılan Dersler:</b>")
+        for c in projection.counted_courses:
+            tag = "tahmini" if c.get("source") == "tahmini" else "resmî"
+            title = f"{c['code']} - {c['name']}" if c.get("code") else str(c.get("name") or "")
+            lines.append(
+                f"• {html.escape(title)} ({c['credit']:g} kr): <b>{html.escape(c['letter'])}</b> <i>({tag})</i>"
+            )
+
+    lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def _format_slot_line(slot: ScheduleSlot) -> str:
+    time_txt = f"{slot.start_time}-{slot.end_time}" if slot.end_time else slot.start_time
+    title = f"{slot.course_code} - {slot.course_name}" if slot.course_code else slot.course_name
+    extras = [x for x in (slot.classroom, slot.instructor) if x]
+    suffix = f" <i>({' | '.join(extras)})</i>" if extras else ""
+    return f"⏰ <code>{html.escape(time_txt)}</code> • <b>{html.escape(title)}</b>{suffix}"
+
+
+def format_daily_schedule(slots: list[ScheduleSlot], target_date: date, base_url: str) -> str:
+    """Belirli bir günün ders programını Telegram HTML mesajına çevirir."""
+    lines = [
+        "🗓️ <b>Günün Ders Programı</b>",
+        f"📅 <i>{html.escape(format_tr_date(target_date))}</i>",
+        "",
+    ]
+    if not slots:
+        lines.append("Bugün için kayıtlı ders bulunmuyor 🎉")
+    else:
+        for s in slots:
+            lines.append(_format_slot_line(s))
+    lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def format_weekly_schedule(slots: list[ScheduleSlot], base_url: str) -> str:
+    """Tüm haftalık ders programını Telegram HTML mesajına çevirir."""
+    lines = ["🗓️ <b>Haftalık Ders Programı</b>", ""]
+    if not slots:
+        lines.append("ÜBYS üzerinde ders programı verisi bulunamadı.")
+    else:
+        grouped: OrderedDict[int, list[ScheduleSlot]] = OrderedDict()
+        for s in sorted(slots, key=lambda x: (x.day_of_week, x.start_time, x.course_code)):
+            grouped.setdefault(s.day_of_week, []).append(s)
+        for day_slots in grouped.values():
+            lines.append(f"📌 <b>{html.escape(day_slots[0].day_name)}</b>")
+            for s in day_slots:
+                lines.append(f"  {_format_slot_line(s)}")
+            lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def format_exam_schedule(exams: list[ExamScheduleItem], today: date, base_url: str) -> str:
+    """Yaklaşan ve tüm sınav programını Telegram HTML mesajına çevirir."""
+    lines = ["📝 <b>ÜBYS Sınav Takvimi</b>", ""]
+    if not exams:
+        lines.append("ÜBYS üzerinde yayınlanmış sınav takvimi bulunamadı.")
+    else:
+        upcoming = [e for e in exams if e.exam_date >= today]
+        to_show = upcoming if upcoming else exams
+        for ex in to_show[:25]:
+            days_left = (ex.exam_date - today).days
+            day_tag = "BUGÜN" if days_left == 0 else (f"{days_left} gün kaldı" if days_left > 0 else "Geçti")
+            title = f"{ex.course_code} - {ex.course_name}" if ex.course_code else ex.course_name
+            time_part = f" | {ex.exam_time}" if ex.exam_time else ""
+            room_part = f" | Salon: {ex.classroom}" if ex.classroom else ""
+            seat_part = f" (Sıra: {ex.seat})" if ex.seat else ""
+            lines.append(f"• <b>{html.escape(title)}</b> — <i>{html.escape(ex.exam_type)}</i>")
+            lines.append(
+                f"  📅 {html.escape(format_tr_date(ex.exam_date, with_weekday=True))}{html.escape(time_part + room_part + seat_part)} (<b>{html.escape(day_tag)}</b>)"
+            )
+    lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def format_exam_reminders(reminders: list[tuple[ExamScheduleItem, int]], base_url: str) -> str:
+    """Sınav günü yaklaşan dersler için hatırlatma mesajı üretir."""
+    lines = ["📝 <b>Yaklaşan Sınav Hatırlatması</b>", ""]
+    for ex, days_until in reminders:
+        badge = "🚨 <b>BUGÜN SINAV VAR</b>" if days_until == 0 else ("⏰ <b>YARIN SINAV VAR</b>" if days_until == 1 else f"⏳ <b>{days_until} GÜN KALDI</b>")
+        title = f"{ex.course_code} - {ex.course_name}" if ex.course_code else ex.course_name
+        lines.append(f"{badge} • <b>{html.escape(title)}</b> ({html.escape(ex.exam_type)})")
+        meta = [format_tr_date(ex.exam_date)]
+        if ex.exam_time:
+            meta.append(f"Saat {ex.exam_time}")
+        if ex.classroom:
+            meta.append(f"Salon: {ex.classroom}")
+        if ex.seat:
+            meta.append(f"Sıra: {ex.seat}")
+        lines.append(f"   └ {html.escape(' | '.join(meta))}")
+        lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def format_material_alerts(materials: list[CourseMaterial], base_url: str) -> str:
+    """Ders içine yüklenen yeni materyal, ödev veya duyuru bildirimi üretir."""
+    icon_map = {"ödev": "📝", "duyuru": "📢", "dosya": "📄"}
+    lines = ["📚 <b>Ders Materyali / Ödev Bildirimi</b>", ""]
+    for mat in materials[:20]:
+        icon = icon_map.get(mat.category, "📄")
+        course_title = f"{mat.course_code} - {mat.course_name}" if mat.course_code else mat.course_name
+        lines.append(f"{icon} <b>[{html.escape(mat.category.upper())}]</b> {html.escape(course_title)}")
+        if mat.url:
+            lines.append(f'   └ <a href="{html.escape(mat.url, quote=True)}">{html.escape(mat.title)}</a>')
+        else:
+            lines.append(f"   └ <b>{html.escape(mat.title)}</b>")
+        if mat.due_date:
+            lines.append(f"   └ ⏳ Son Teslim: <code>{html.escape(mat.due_date)}</code>")
+        lines.append("")
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def format_weekly_briefing(
+    today: date,
+    ongoing_cal: list[CalendarEvent],
+    upcoming_cal: list[CalendarEvent],
+    exams: list[ExamScheduleItem],
+    attendance_reports: list[AttendanceReport],
+    gpa_projection: Optional[GpaProjection],
+    weather: Optional[WeatherForecast],
+    base_url: str,
+) -> str:
+    """Haftalık öğrenci özet brifingi mesajını oluşturur."""
+    lines = [
+        "📆 <b>Haftalık Kastamonu ÜBYS Öğrenci Özeti</b>",
+        f"📅 <i>{html.escape(format_tr_date(today))}</i>",
+        "",
+    ]
+
+    if weather is not None:
+        lines.extend(_format_weather_inline_lines(weather))
+        if weather.tomorrow_summary:
+            lines.append(f"   └ Yarın: {html.escape(weather.tomorrow_summary)}")
+        lines.append("")
+
+    upcoming_exams = [e for e in exams if 0 <= (e.exam_date - today).days <= 14]
+    if upcoming_exams:
+        lines.append("📝 <b>Önümüzdeki 14 Günün Sınavları:</b>")
+        for ex in upcoming_exams[:8]:
+            days_left = (ex.exam_date - today).days
+            t_str = f" {ex.exam_time}" if ex.exam_time else ""
+            r_str = f" | {ex.classroom}" if ex.classroom else ""
+            lines.append(
+                f"• <b>{html.escape(ex.course_code or ex.course_name)}</b> ({html.escape(ex.exam_type)}): "
+                f"{html.escape(format_tr_date(ex.exam_date, with_weekday=False))}{html.escape(t_str + r_str)} ({days_left} gün)"
+            )
+        lines.append("")
+
+    risky_att = [r for r in attendance_reports if r.risk_level in {"warning", "critical", "failed"}]
+    if risky_att:
+        lines.append("⚠️ <b>Devamsızlık Uyarısı Olan Dersler:</b>")
+        for r in risky_att:
+            ico = _ATTENDANCE_ICONS.get(r.risk_level, "⚠️")
+            lines.append(f"{ico} <b>{html.escape(r.course_code or r.course_name)}</b>: {html.escape(format_attendance_detail_line(r))}")
+        lines.append("")
+
+    if gpa_projection is not None and gpa_projection.projected_yano is not None:
+        gano_part = f" | GANO: <code>{gpa_projection.projected_gano:.2f}</code>" if gpa_projection.projected_gano is not None else ""
+        lines.append(f"📊 <b>Tahmini YANO:</b> <code>{gpa_projection.projected_yano:.2f}</code>{gano_part}")
+        lines.append("")
+
+    week_cal = [e for e in upcoming_cal if 0 <= (e.start_date - today).days <= 10]
+    if ongoing_cal or week_cal:
+        lines.append("🗓️ <b>Akademik Takvim (Yakın Tarihler):</b>")
+        for ev in ongoing_cal[:4]:
+            lines.append(f"• ⏳ <b>{html.escape(ev.title)}</b> (Devam ediyor)")
+        for ev in week_cal[:5]:
+            days_left = (ev.start_date - today).days
+            lines.append(f"• 📅 <b>{html.escape(ev.title)}</b> ({days_left} gün kaldı)")
+        lines.append("")
+
+    if len(lines) <= 4:
+        lines.append("Bu hafta için kritik sınav, devamsızlık uyarısı veya takvim etkinliği görünmüyor. İyi haftalar! 💪")
+        lines.append("")
+
+    lines.append(f'🔗 <a href="{html.escape(base_url, quote=True)}">Kastamonu ÜBYS\'ye Git</a>')
+    return "\n".join(lines)
+
+
+def format_help_message() -> str:
+    """Telegram etkileşimli bot komut listesini HTML formatında döndürür."""
+    return "\n".join(
+        [
+            "🤖 <b>Kastamonu ÜBYS Asistanı Komutları</b>",
+            "",
+            "• /notlar — Güncel ders notlarını listeler",
+            "• /devamsizlik — Gün/saat bazlı devamsızlık haklarını gösterir",
+            "• /hesapla <code>VIZE [ORAN]</code> — Final hedeflerini hesaplar <i>(ör. /hesapla 80 30/70)</i>",
+            "• /yemek — Günün yemekhane menüsü ve hava durumunu gönderir",
+            "• /hava — Kuzeykent Kampüsü güncel & 3 günlük hava tahmini",
+            "• /program — Haftalık veya bugünkü ders programını gösterir",
+            "• /sinav — Yaklaşan sınav tarih ve salonlarını listeler",
+            "• /duyuru — OİDB, SKS ve okul güncel duyurularını getirir",
+            "• /takvim — Yaklaşan akademik takvim tarihlerini gösterir",
+            "• /transkript — Dönem ortalamalarını ve genel GANO özetini verir",
+            "• /gano — Tahmini dönem sonu YANO/GANO & Onur belgesi durumu",
+            "• /ozet — Haftalık toplu öğrenci özetini gösterir",
+            "",
+            "ℹ️ <i>Not: GitHub Actions modunda komutlar ~15 dakikalık kontrol döngüsünde yanıtlanır; VPS/Docker --listen kipinde anlık yanıt verir.</i>",
+        ]
+    )

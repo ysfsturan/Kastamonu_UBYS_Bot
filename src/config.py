@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 try:
     from dotenv import load_dotenv
@@ -176,6 +177,54 @@ def _parse_course_hours(raw: Optional[str]) -> dict[str, tuple[float, float]]:
     return result
 
 
+def _derive_announcement_label(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return "Duyuru"
+    sub = host.split(".")[0]
+    if sub in {"kastamonu", "ubys", "sks", "oidb"}:
+        return {
+            "kastamonu": "Kastamonu Üni",
+            "ubys": "ÜBYS",
+            "sks": "SKS",
+            "oidb": "OİDB",
+        }[sub]
+    return sub.replace("i", "İ").upper()
+
+
+def _parse_announcement_urls(raw: Optional[str]) -> list[tuple[str, str]]:
+    """'KMYO|https://kmyo.kastamonu.edu.tr/, https://mf.kastamonu.edu.tr/' adreslerini okur."""
+    if raw is None or raw.strip() == "":
+        return []
+    result: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for entry in re.split(r"[,;\n]+", raw):
+        cleaned = entry.strip()
+        if not cleaned:
+            continue
+        if "|" in cleaned:
+            label_part, url_part = cleaned.split("|", 1)
+            label = label_part.strip()
+            url = _validate_http_url(url_part, "ANNOUNCEMENT_URLS")
+            if not label:
+                label = _derive_announcement_label(url)
+        else:
+            url = _validate_http_url(cleaned, "ANNOUNCEMENT_URLS")
+            label = _derive_announcement_label(url)
+        if url not in seen_urls:
+            seen_urls.add(url)
+            result.append((label, url))
+    return result
+
+
+def _parse_str_list(raw: Optional[str]) -> list[str]:
+    if raw is None or raw.strip() == "":
+        return []
+    return [part.strip() for part in re.split(r"[,;\n]+", raw) if part.strip()]
+
+
 @dataclass(frozen=True)
 class Config:
     """Uygulama yapılandırma ayarları."""
@@ -221,6 +270,21 @@ class Config:
     calendar_lookahead_days: int = 30
     calendar_notify_hour: int = 8
     calendar_weekly_summary: bool = True
+    enable_weather: bool = True
+    weather_lat: float = 41.4307
+    weather_lon: float = 33.7764
+    weather_location: str = "Kastamonu (Kuzeykent)"
+    enable_announcements: bool = True
+    announcement_urls: list[tuple[str, str]] = field(default_factory=list)
+    announcement_keywords: list[str] = field(default_factory=list)
+    enable_schedule: bool = True
+    enable_exam_schedule: bool = True
+    schedule_notify_hour: int = 8
+    exam_reminder_days: list[int] = field(default_factory=lambda: [7, 3, 1, 0])
+    enable_materials: bool = True
+    enable_weekly_briefing: bool = True
+    weekly_briefing_hour: int = 20
+    enable_commands: bool = True
 
 
 def load_config(
@@ -370,4 +434,38 @@ def load_config(
         calendar_weekly_summary=_parse_bool(
             os.getenv("CALENDAR_WEEKLY_SUMMARY"), True, "CALENDAR_WEEKLY_SUMMARY"
         ),
+        enable_weather=_parse_bool(os.getenv("ENABLE_WEATHER"), True, "ENABLE_WEATHER"),
+        weather_lat=_parse_float(
+            os.getenv("WEATHER_LAT"), 41.4307, "WEATHER_LAT", minimum=-90.0
+        ),
+        weather_lon=_parse_float(
+            os.getenv("WEATHER_LON"), 33.7764, "WEATHER_LON", minimum=-180.0
+        ),
+        weather_location=os.getenv("WEATHER_LOCATION", "Kastamonu (Kuzeykent)").strip()
+        or "Kastamonu (Kuzeykent)",
+        enable_announcements=_parse_bool(
+            os.getenv("ENABLE_ANNOUNCEMENTS"), True, "ENABLE_ANNOUNCEMENTS"
+        ),
+        announcement_urls=_parse_announcement_urls(os.getenv("ANNOUNCEMENT_URLS")),
+        announcement_keywords=_parse_str_list(os.getenv("ANNOUNCEMENT_KEYWORDS")),
+        enable_schedule=_parse_bool(os.getenv("ENABLE_SCHEDULE"), True, "ENABLE_SCHEDULE"),
+        enable_exam_schedule=_parse_bool(
+            os.getenv("ENABLE_EXAM_SCHEDULE"), True, "ENABLE_EXAM_SCHEDULE"
+        ),
+        schedule_notify_hour=_parse_int(
+            os.getenv("SCHEDULE_NOTIFY_HOUR"), 8, "SCHEDULE_NOTIFY_HOUR", minimum=0, maximum=23
+        ),
+        exam_reminder_days=_parse_int_list(
+            os.getenv("EXAM_REMINDER_DAYS"), [7, 3, 1, 0], "EXAM_REMINDER_DAYS"
+        ),
+        enable_materials=_parse_bool(
+            os.getenv("ENABLE_MATERIALS"), True, "ENABLE_MATERIALS"
+        ),
+        enable_weekly_briefing=_parse_bool(
+            os.getenv("ENABLE_WEEKLY_BRIEFING"), True, "ENABLE_WEEKLY_BRIEFING"
+        ),
+        weekly_briefing_hour=_parse_int(
+            os.getenv("WEEKLY_BRIEFING_HOUR"), 20, "WEEKLY_BRIEFING_HOUR", minimum=0, maximum=23
+        ),
+        enable_commands=_parse_bool(os.getenv("ENABLE_COMMANDS"), True, "ENABLE_COMMANDS"),
     )

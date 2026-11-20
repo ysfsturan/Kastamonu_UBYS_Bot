@@ -80,6 +80,7 @@ class CourseGrade:
     weight_source: Optional[str] = None
     hours_source: Optional[str] = None
     catalog_assessments: list[dict[str, Any]] = field(default_factory=list)
+    materials: list[CourseMaterial] = field(default_factory=list)
 
     def course_key(self) -> str:
         """Dersi dönem ve kod/ad bazında benzersiz olarak tanımlar."""
@@ -357,3 +358,171 @@ class AttendanceReport:
     max_total_days: Optional[int] = None
     used_total_days: Optional[float] = None
     remaining_total_days: Optional[int] = None
+
+
+@dataclass
+class WeatherForecast:
+    """Kastamonu / Kuzeykent kampüs hava durumu tahmini."""
+
+    location_name: str
+    forecast_date: date
+    current_temp: Optional[float]
+    apparent_temp: Optional[float]
+    temp_min: Optional[float]
+    temp_max: Optional[float]
+    precip_probability: Optional[int]
+    wind_speed: Optional[float]
+    weather_code: int
+    condition_text: str
+    condition_icon: str
+    advice: str
+    tomorrow_summary: Optional[str] = None
+    daily_summaries: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Announcement:
+    """Üniversite, OİDB, SKS, Fakülte/MYO veya ÜBYS duyuru kaydı."""
+
+    announcement_id: str
+    source: str
+    title: str
+    url: str
+    published_date: Optional[str] = None
+    summary: str = ""
+
+
+@dataclass
+class GpaProjection:
+    """Dönem sonu YANO/GANO ve onur belgesi projeksiyonu."""
+
+    projected_yano: Optional[float]
+    projected_gano: Optional[float]
+    current_gano: Optional[float]
+    total_term_credit: float
+    counted_courses: list[dict[str, Any]] = field(default_factory=list)
+    has_failing_grade: bool = False
+    has_conditional_grade: bool = False
+    honor_status: str = "normal"  # "yuksek_onur", "onur", "normal", "risk"
+    dc_pass_safe: Optional[bool] = None
+    points_to_honor: Optional[float] = None
+    points_to_high_honor: Optional[float] = None
+
+
+@dataclass
+class ScheduleSlot:
+    """Haftalık ders programı satırı."""
+
+    day_of_week: int
+    day_name: str
+    start_time: str
+    end_time: str = ""
+    course_code: str = ""
+    course_name: str = ""
+    classroom: Optional[str] = None
+    instructor: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "day_of_week": self.day_of_week,
+            "day_name": self.day_name,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "course_code": self.course_code,
+            "course_name": self.course_name,
+            "classroom": self.classroom,
+            "instructor": self.instructor,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ScheduleSlot:
+        return cls(
+            day_of_week=int(data.get("day_of_week") or 0),
+            day_name=str(data.get("day_name") or ""),
+            start_time=str(data.get("start_time") or ""),
+            end_time=str(data.get("end_time") or ""),
+            course_code=str(data.get("course_code") or ""),
+            course_name=str(data.get("course_name") or ""),
+            classroom=data.get("classroom"),
+            instructor=data.get("instructor"),
+        )
+
+
+@dataclass
+class ExamScheduleItem:
+    """ÜBYS sınav programı kaydı."""
+
+    course_code: str
+    course_name: str
+    exam_type: str
+    exam_date: date
+    exam_time: Optional[str] = None
+    classroom: Optional[str] = None
+    seat: Optional[str] = None
+
+    def exam_key(self) -> str:
+        ident = " ".join((self.course_code or self.course_name).split()).upper()
+        etype = " ".join(self.exam_type.split()).lower()
+        return f"{ident}::{etype}::{self.exam_date.isoformat()}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "course_code": self.course_code,
+            "course_name": self.course_name,
+            "exam_type": self.exam_type,
+            "exam_date": self.exam_date.isoformat(),
+            "exam_time": self.exam_time,
+            "classroom": self.classroom,
+            "seat": self.seat,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExamScheduleItem:
+        return cls(
+            course_code=str(data.get("course_code") or ""),
+            course_name=str(data.get("course_name") or ""),
+            exam_type=str(data.get("exam_type") or ""),
+            exam_date=date.fromisoformat(str(data["exam_date"])),
+            exam_time=data.get("exam_time"),
+            classroom=data.get("classroom"),
+            seat=data.get("seat"),
+        )
+
+
+@dataclass
+class CourseMaterial:
+    """Ders içi yüklenen dosya/materyal, ödev veya ders duyurusu kaydı."""
+
+    material_id: str
+    course_code: str
+    course_name: str
+    category: str  # "dosya", "ödev", "duyuru"
+    title: str
+    url: Optional[str] = None
+    due_date: Optional[str] = None
+    published_date: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "material_id": self.material_id,
+            "course_code": self.course_code,
+            "course_name": self.course_name,
+            "category": self.category,
+            "title": self.title,
+            "url": self.url,
+            "due_date": self.due_date,
+            "published_date": self.published_date,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CourseMaterial:
+        return cls(
+            material_id=str(data.get("material_id") or ""),
+            course_code=str(data.get("course_code") or ""),
+            course_name=str(data.get("course_name") or ""),
+            category=str(data.get("category") or "dosya"),
+            title=str(data.get("title") or ""),
+            url=data.get("url"),
+            due_date=data.get("due_date"),
+            published_date=data.get("published_date"),
+        )
