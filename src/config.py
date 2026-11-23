@@ -345,15 +345,15 @@ def load_config(
     gist_filename = os.getenv("GIST_FILENAME", "grades_state.json").strip() or "grades_state.json"
 
     base_url = _validate_http_url(
-        os.getenv("UBYS_BASE_URL", "https://ubys.kastamonu.edu.tr"),
+        (os.getenv("UBYS_BASE_URL") or "").strip() or "https://ubys.kastamonu.edu.tr",
         "UBYS_BASE_URL",
     )
     sks_url = _validate_http_url(
-        os.getenv("SKS_URL", "https://sks.kastamonu.edu.tr"),
+        (os.getenv("SKS_URL") or "").strip() or "https://sks.kastamonu.edu.tr",
         "SKS_URL",
     ) + "/"
     calendar_url = _validate_http_url(
-        os.getenv("CALENDAR_URL", "https://akademiktakvim.kastamonu.edu.tr"),
+        (os.getenv("CALENDAR_URL") or "").strip() or "https://akademiktakvim.kastamonu.edu.tr",
         "CALENDAR_URL",
     ) + "/"
 

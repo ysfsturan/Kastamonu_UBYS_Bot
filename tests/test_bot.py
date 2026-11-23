@@ -595,6 +595,70 @@ class ConfigAndGistTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config()
 
+    def test_load_config_empty_github_actions_vars_fallback(self) -> None:
+        env = {
+            "UBYS_USERNAME": "221234567",
+            "UBYS_PASSWORD": "secret",
+            "TELEGRAM_BOT_TOKEN": "123:ABC",
+            "TELEGRAM_CHAT_ID": "998877",
+            "GIST_ID": "",
+            "GIST_TOKEN": "",
+            "UBYS_BASE_URL": "",
+            "CALENDAR_FACULTY": "",
+            "ENABLE_GRADES": "",
+            "ENABLE_DINING": "",
+            "ENABLE_CALENDAR": "",
+            "ENABLE_ATTENDANCE": "",
+            "ENABLE_TRANSCRIPT": "",
+            "ENABLE_CATALOG": "",
+            "UBYS_PROGRAM": "",
+            "MIDTERM_WEIGHT": "",
+            "FINAL_WEIGHT": "",
+            "FINAL_MIN_SCORE": "",
+            "COURSE_WEIGHTS": "",
+            "SEMESTER_WEEKS": "",
+            "THEORY_MIN_ATTENDANCE": "",
+            "PRACTICE_MIN_ATTENDANCE": "",
+            "COURSE_HOURS": "",
+            "CALENDAR_CATEGORIES": "",
+            "CALENDAR_REMINDER_DAYS": "",
+            "CALENDAR_LOOKAHEAD_DAYS": "",
+            "CALENDAR_NOTIFY_HOUR": "",
+            "CALENDAR_WEEKLY_SUMMARY": "",
+            "CALENDAR_URL": "",
+            "SKS_URL": "",
+            "DINING_SHEET_URL": "",
+            "DINING_NOTIFY_HOUR": "",
+            "ENABLE_WEATHER": "",
+            "WEATHER_LAT": "",
+            "WEATHER_LON": "",
+            "WEATHER_LOCATION": "",
+            "ENABLE_ANNOUNCEMENTS": "",
+            "ANNOUNCEMENT_URLS": "",
+            "ANNOUNCEMENT_KEYWORDS": "",
+            "ENABLE_SCHEDULE": "",
+            "ENABLE_EXAM_SCHEDULE": "",
+            "SCHEDULE_NOTIFY_HOUR": "",
+            "EXAM_REMINDER_DAYS": "",
+            "ENABLE_MATERIALS": "",
+            "ENABLE_WEEKLY_BRIEFING": "",
+            "WEEKLY_BRIEFING_HOUR": "",
+            "ENABLE_COMMANDS": "",
+            "ALL_SEMESTERS": "",
+            "UBYS_USER_GROUP_ID": "",
+            "NOTIFY_ON_FIRST_RUN": "",
+        }
+        with patch("src.config.load_dotenv", None), patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        self.assertEqual(cfg.ubys_base_url, "https://ubys.kastamonu.edu.tr")
+        self.assertEqual(cfg.sks_url, "https://sks.kastamonu.edu.tr/")
+        self.assertEqual(cfg.calendar_url, "https://akademiktakvim.kastamonu.edu.tr/")
+        self.assertIsNone(cfg.dining_sheet_url)
+        self.assertEqual(cfg.calendar_faculty, "GENEL")
+        self.assertEqual(cfg.calendar_notify_hour, 8)
+        self.assertEqual(cfg.calendar_lookahead_days, 30)
+        self.assertTrue(cfg.calendar_weekly_summary)
+
     def test_gist_state_store_load_and_save(self) -> None:
         store = GistStateStore(gist_id="gist123", gist_token="tok456", filename="grades_state.json")
         state_payload = {
