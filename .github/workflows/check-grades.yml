@@ -2,16 +2,10 @@ name: Kastamonu ÜBYS Swiss Bot
 
 on:
   schedule:
-    # Her gün sabah Türkiye saatiyle 08:17 (UTC 05:17) — yemekhane, hava, ders programı, takvim ve sabah kontrolü
-    - cron: '17 5 * * *'
-    # Hafta içi 09:43 TR (UTC 06:43) — sabah koşumu gecikir/düşerse yedek + gün içi not/duyuru/komut kontrolü
-    - cron: '43 6 * * 1-5'
-    # Her gün 15:23 TR (UTC 12:23) — gün içi not girişi, duyuru, devamsızlık ve Telegram komutları
-    - cron: '23 12 * * *'
-    # Pazar akşamı 20:23 TR (UTC 17:23) — haftalık toplu öğrenci brifingi
-    - cron: '23 17 * * 0'
-    # Her gün gece 00:19 TR (UTC 21:19) — gece not girişi, devamsızlık, materyal ve duyuru kontrolü
-    - cron: '19 21 * * *'
+    # Hafta içi her sabah Türkiye saatiyle 08:00 (UTC 05:00, Pazartesi-Cuma; hafta sonları hariç)
+    - cron: '0 5 * * 1-5'
+    # GitHub Actions :00 yoğunluğunda 08:00 koşumu düşerse yedek: 08:17 TR (Pazartesi-Cuma; tekrar bildirim atmaz)
+    - cron: '17 5 * * 1-5'
 
   workflow_dispatch:
     inputs:

@@ -84,7 +84,7 @@ Kastamonu Üniversitesi'nin **tüm fakülte, yüksekokul, meslek yüksekokulu (M
 
 ## 💬 Telegram Bot Komutları (`/`)
 
-Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(GitHub Actions modunda zamanlanmış çalışma saatlerinde — her gün `08:17`, hafta içi `09:43`, her gün `15:23`, Pazar akşamı `20:23` ve her gece `00:19` — yanıtlanır; bilgisayar/VPS üzerinde `--listen` ile çalıştırırsan saniyesinde yanıt verir)*:
+Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(GitHub Actions modunda zamanlanmış çalışma saatlerinde — hafta içi her sabah `08:00`, hafta sonları hariç `08:17` yedekli — yanıtlanır; bilgisayar/VPS üzerinde `--listen` ile çalıştırırsan saniyesinde yanıt verir)*:
 
 | Komut | Açıklama |
 | --- | --- |
@@ -163,7 +163,7 @@ Kendi `Fork`ladığın deponun sayfasına dön:
    - Yeşil **Run workflow** düğmesine bas.
 5. Yaklaşık **1 dakika** içinde Telegram'a ders notların, gün bazlı devamsızlık hakların, transkript özetin, günün yemek listesi ve yaklaşan akademik takvim etkinliklerin gelecektir! 🎉
 
-Bot bundan sonra Türkiye saatiyle **her gün sabah `08:17`'de** (yemekhane menüsü, kampüs hava durumu, günün ders programı, akademik takvim ve sabah kontrolü), **hafta içi `09:43`'te** (sabah kontrolü yedeği ve gün içi kontrol), **her gün `15:23`'te** (gün içi not/duyuru/komut kontrolü), **Pazar akşamı `20:23`'te** (haftalık öğrenci özeti) ve **her gece `00:19`'da** (gece not girişi, devamsızlık, materyal ve duyuru kontrolü) otomatik olarak çalışır.
+Bot bundan sonra **hafta içi her sabah Türkiye saatiyle `08:00`'de** (hafta sonları hariç; GitHub Actions gecikmelerine karşı `08:17` yedekli) otomatik olarak çalışır.
 
 ---
 
