@@ -2,10 +2,16 @@ name: Kastamonu ÜBYS Swiss Bot
 
 on:
   schedule:
-    # Hafta içi her sabah Türkiye saatiyle 08:00 (UTC 05:00, Pazartesi-Cuma)
-    - cron: '0 5 * * 1-5'
-    # Haftanın her günü gece Türkiye saatiyle 00:00 (UTC 21:00) - not girişi kontrolü
-    - cron: '0 21 * * *'
+    # Her gün sabah Türkiye saatiyle 08:17 (UTC 05:17) — yemekhane, hava, ders programı, takvim ve sabah kontrolü
+    - cron: '17 5 * * *'
+    # Hafta içi 09:43 TR (UTC 06:43) — sabah koşumu gecikir/düşerse yedek + gün içi not/duyuru/komut kontrolü
+    - cron: '43 6 * * 1-5'
+    # Her gün 15:23 TR (UTC 12:23) — gün içi not girişi, duyuru, devamsızlık ve Telegram komutları
+    - cron: '23 12 * * *'
+    # Pazar akşamı 20:23 TR (UTC 17:23) — haftalık toplu öğrenci brifingi
+    - cron: '23 17 * * 0'
+    # Her gün gece 00:19 TR (UTC 21:19) — gece not girişi, devamsızlık, materyal ve duyuru kontrolü
+    - cron: '19 21 * * *'
 
   workflow_dispatch:
     inputs:
@@ -85,6 +91,12 @@ jobs:
           COURSE_HOURS: ${{ vars.COURSE_HOURS }}
           CALENDAR_CATEGORIES: ${{ vars.CALENDAR_CATEGORIES }}
           CALENDAR_REMINDER_DAYS: ${{ vars.CALENDAR_REMINDER_DAYS }}
+          CALENDAR_LOOKAHEAD_DAYS: ${{ vars.CALENDAR_LOOKAHEAD_DAYS }}
+          CALENDAR_NOTIFY_HOUR: ${{ vars.CALENDAR_NOTIFY_HOUR }}
+          CALENDAR_WEEKLY_SUMMARY: ${{ vars.CALENDAR_WEEKLY_SUMMARY }}
+          CALENDAR_URL: ${{ vars.CALENDAR_URL }}
+          SKS_URL: ${{ vars.SKS_URL }}
+          DINING_SHEET_URL: ${{ vars.DINING_SHEET_URL }}
           DINING_NOTIFY_HOUR: ${{ vars.DINING_NOTIFY_HOUR }}
           ENABLE_WEATHER: ${{ vars.ENABLE_WEATHER }}
           WEATHER_LAT: ${{ vars.WEATHER_LAT }}

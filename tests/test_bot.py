@@ -2472,5 +2472,509 @@ class PolishAndReliabilityTests(unittest.TestCase):
         self.assertIn("BPBZ102 - Algoritmalar: <code>BB</code>", msg)
 
 
+class ModuleSchedulingAndIndependenceTests(unittest.TestCase):
+    @staticmethod
+    def _base_course() -> CourseGrade:
+        return CourseGrade(
+            semester="2026 - Güz",
+            code="BPBZ201",
+            name="İnternet Programcılığı",
+            exams=[ExamGrade(exam_type="Ara Sınav", name="Vize", score="85")],
+        )
+
+    @staticmethod
+    def _sample_weather() -> WeatherForecast:
+        return WeatherForecast(
+            location_name="Kastamonu (Kuzeykent)",
+            forecast_date=date(2026, 11, 23),
+            current_temp=4.0,
+            apparent_temp=2.0,
+            temp_min=1.0,
+            temp_max=9.0,
+            precip_probability=10,
+            wind_speed=12.0,
+            weather_code=2,
+            condition_text="Parçalı Bulutlu",
+            condition_icon="⛅",
+            advice="Serin hava, ince mont yeterli.",
+        )
+
+    def test_other_modules_run_even_when_no_new_grades(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            course = self._base_course()
+            save_state(
+                state_path,
+                {
+                    "schema_version": 1,
+                    "baseline_initialized": True,
+                    "courses": build_course_snapshot([course]),
+                    "swiss_tool": {
+                        "seen_announcement_ids": ["old_ann_1"],
+                    },
+                },
+            )
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=True,
+                enable_dining=True,
+                enable_weather=True,
+                enable_calendar=True,
+                enable_announcements=True,
+                enable_schedule=True,
+                enable_exam_schedule=True,
+                enable_attendance=True,
+                enable_transcript=False,
+                enable_catalog=False,
+                enable_materials=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
+            )
+
+            monday_dt = datetime(2026, 11, 23, 8, 20, tzinfo=TR_TZ)
+            monday_menu = DailyMenu(
+                menu_date=date(2026, 11, 23),
+                items=[DiningItem(name="Mercimek Ç.", calories="120 kkal", category="Çorba")],
+                total_calories_min=120,
+                total_calories_max=120,
+            )
+            cal_event = CalendarEvent(
+                event_id="500",
+                title="Güz Ara Sınav",
+                start_date=date(2026, 11, 30),
+                end_date=date(2026, 12, 4),
+                category="Ders ve Sınav",
+                faculty="Genel",
+                term="2026-2027",
+            )
+            ann = Announcement(
+                announcement_id="new_ann_1",
+                source="OİDB",
+                title="Yeni Akademik Duyuru",
+                url="https://oidb.kastamonu.edu.tr/duyuru/1",
+            )
+            slot = ScheduleSlot(
+                day_of_week=0,
+                day_name="Pazartesi",
+                start_time="09:00",
+                end_time="10:45",
+                course_code="BPBZ201",
+                course_name="İnternet Programcılığı",
+                classroom="Lab-2",
+            )
+            exam = ExamScheduleItem(
+                course_code="BPBZ201",
+                course_name="İnternet Programcılığı",
+                exam_type="Ara Sınav",
+                exam_date=date(2026, 11, 24),
+                exam_time="10:00",
+                classroom="KMYO-Z04",
+            )
+
+            with (
+                patch("src.main.now_tr", return_value=monday_dt),
+                patch("src.main.UBYSClient") as mock_ubys,
+                patch("src.main.fetch_dining_menus", return_value=[monday_menu]),
+                patch("src.main.fetch_weather_forecast", return_value=self._sample_weather()),
+                patch("src.main.fetch_calendar_events", return_value=("Genel", "2026-2027", [cal_event])),
+                patch("src.main.fetch_all_announcements", return_value=[ann]),
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                inst = mock_ubys.return_value.__enter__.return_value
+                inst.fetch_grades.return_value = [course]
+                inst.last_home_gano = None
+                inst.student_program_hints = []
+                inst.home_announcements = []
+                inst.fetch_weekly_schedule.return_value = [slot]
+                inst.fetch_exam_schedule.return_value = [exam]
+
+                self.assertEqual(run_once(cfg), 0)
+
+            sent_msgs = [call.args[0] for call in mock_notifier.return_value.send_message.call_args_list]
+            self.assertEqual(len(sent_msgs), 6)
+            joined = "\n---\n".join(sent_msgs)
+            self.assertNotIn("ÜBYS Not Bildirimi", joined)
+            self.assertIn("Günün Yemekhane Menüsü", joined)
+            self.assertIn("Kastamonu (Kuzeykent)", joined)
+            self.assertIn("Akademik Takvim", joined)
+            self.assertIn("Yeni Akademik Duyuru", joined)
+            self.assertIn("Günün Ders Programı", joined)
+            self.assertIn("YARIN SINAV VAR", joined)
+
+    def test_standalone_weather_fallback_and_dedup(self) -> None:
+        monday_dt = datetime(2026, 11, 23, 8, 20, tzinfo=TR_TZ)
+        later_dt = datetime(2026, 11, 23, 9, 43, tzinfo=TR_TZ)
+
+        # 1. Yemekhane kapalıyken hafta içi bağımsız hava durumu gönderilmeli ve aynı gün tekrarlanmamalı
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=False,
+                enable_dining=False,
+                enable_weather=True,
+                enable_calendar=False,
+                enable_announcements=False,
+                enable_schedule=False,
+                enable_exam_schedule=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
+            )
+            with (
+                patch("src.main.now_tr", side_effect=[monday_dt, later_dt]),
+                patch("src.main.fetch_weather_forecast", return_value=self._sample_weather()) as mock_wf,
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_wf.call_count, 1)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 1)
+            self.assertIn("Hava Durumu", mock_notifier.return_value.send_message.call_args[0][0])
+
+        # 2. Yemekhanede bugün menü yoksa bağımsız hava durumu yine gönderilmeli
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=False,
+                enable_dining=True,
+                enable_weather=True,
+                enable_calendar=False,
+                enable_announcements=False,
+                enable_schedule=False,
+                enable_exam_schedule=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
+            )
+            with (
+                patch("src.main.now_tr", return_value=monday_dt),
+                patch("src.main.fetch_dining_menus", return_value=[]),
+                patch("src.main.fetch_weather_forecast", return_value=self._sample_weather()),
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 1)
+            self.assertIn("Hava Durumu", mock_notifier.return_value.send_message.call_args[0][0])
+
+        # 3. Yemekhane menüsü hava durumuyla gönderildiyse ayrıca tekrar hava durumu atılmamalı
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=False,
+                enable_dining=True,
+                enable_weather=True,
+                enable_calendar=False,
+                enable_announcements=False,
+                enable_schedule=False,
+                enable_exam_schedule=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
+            )
+            monday_menu = DailyMenu(
+                menu_date=date(2026, 11, 23),
+                items=[DiningItem(name="Mercimek Ç.", calories="120 kkal", category="Çorba")],
+            )
+            with (
+                patch("src.main.now_tr", side_effect=[monday_dt, later_dt]),
+                patch("src.main.fetch_dining_menus", return_value=[monday_menu]),
+                patch("src.main.fetch_weather_forecast", return_value=self._sample_weather()) as mock_wf,
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_wf.call_count, 1)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 1)
+            self.assertIn("Günün Yemekhane Menüsü", mock_notifier.return_value.send_message.call_args[0][0])
+
+    def test_schedule_and_exams_use_cache_when_grades_fail_and_preserve_cache_on_empty_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            mon_slot = ScheduleSlot(
+                day_of_week=0,
+                day_name="Pazartesi",
+                start_time="09:00",
+                end_time="10:45",
+                course_code="BPBZ201",
+                course_name="İnternet Programcılığı",
+                classroom="Lab-2",
+            )
+            tue_slot = ScheduleSlot(
+                day_of_week=1,
+                day_name="Salı",
+                start_time="13:00",
+                end_time="14:45",
+                course_code="BPBZ201",
+                course_name="İnternet Programcılığı",
+                classroom="Lab-1",
+            )
+            exam = ExamScheduleItem(
+                course_code="BPBZ201",
+                course_name="İnternet Programcılığı",
+                exam_type="Ara Sınav",
+                exam_date=date(2026, 11, 24),
+                exam_time="10:00",
+                classroom="KMYO-Z04",
+            )
+            save_state(
+                state_path,
+                {
+                    "schema_version": 1,
+                    "baseline_initialized": True,
+                    "courses": build_course_snapshot([self._base_course()]),
+                    "swiss_tool": {
+                        "schedule_cache": {
+                            "updated_date": "2026-11-20",
+                            "slots": [mon_slot.to_dict(), tue_slot.to_dict()],
+                        },
+                        "exam_schedule_cache": {
+                            "updated_date": "2026-11-22",
+                            "exams": [exam.to_dict()],
+                        },
+                    },
+                },
+            )
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                alert_after_consecutive_errors=5,
+                enable_grades=True,
+                enable_dining=False,
+                enable_weather=False,
+                enable_calendar=False,
+                enable_announcements=False,
+                enable_schedule=True,
+                enable_exam_schedule=True,
+                enable_attendance=False,
+                enable_transcript=False,
+                enable_catalog=False,
+                enable_materials=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
+            )
+
+            # 1. ÜBYS not çekimi hata verse bile önbellekteki ders programı ve sınav hatırlatması çalışmalı
+            monday_dt = datetime(2026, 11, 23, 8, 20, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=monday_dt),
+                patch("src.main.UBYSClient") as mock_ubys,
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                inst = mock_ubys.return_value.__enter__.return_value
+                inst.fetch_grades.side_effect = NetworkError("ÜBYS zaman aşımı")
+                self.assertEqual(run_once(cfg), 1)
+            sent1 = [call.args[0] for call in mock_notifier.return_value.send_message.call_args_list]
+            self.assertEqual(len(sent1), 2)
+            self.assertIn("Günün Ders Programı", sent1[0])
+            self.assertIn("YARIN SINAV VAR", sent1[1])
+
+            # 2. Yenileme boş liste [] döndürse bile mevcut geçerli schedule_cache silinmemeli
+            saved_mid = load_state(state_path)
+            assert saved_mid is not None
+            saved_mid["swiss_tool"]["schedule_cache"]["updated_date"] = "2026-11-10"
+            save_state(state_path, saved_mid)
+
+            tuesday_dt = datetime(2026, 11, 24, 8, 20, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=tuesday_dt),
+                patch("src.main.UBYSClient") as mock_ubys,
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                inst = mock_ubys.return_value.__enter__.return_value
+                inst.fetch_grades.return_value = [self._base_course()]
+                inst.last_home_gano = None
+                inst.student_program_hints = []
+                inst.home_announcements = []
+                inst.fetch_weekly_schedule.return_value = []
+                inst.fetch_exam_schedule.return_value = []
+                self.assertEqual(run_once(cfg), 0)
+
+            sent2 = [call.args[0] for call in mock_notifier.return_value.send_message.call_args_list]
+            self.assertTrue(any("Günün Ders Programı" in m and "Lab-1" in m for m in sent2))
+            saved_after = load_state(state_path)
+            assert saved_after is not None
+            self.assertEqual(len(saved_after["swiss_tool"]["schedule_cache"]["slots"]), 2)
+
+            # 3. Önbellekteki slots=[] ve active_sem_courses=[] iken schedule yenileme tekrar denenmeli
+            saved_after["swiss_tool"]["schedule_cache"] = {"updated_date": "2026-11-24", "slots": []}
+            save_state(state_path, saved_after)
+            wednesday_dt = datetime(2026, 11, 25, 8, 20, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=wednesday_dt),
+                patch("src.main.UBYSClient") as mock_ubys,
+                patch("src.main.TelegramNotifier"),
+            ):
+                inst = mock_ubys.return_value.__enter__.return_value
+                inst.fetch_grades.return_value = []
+                inst.last_home_gano = None
+                inst.student_program_hints = []
+                inst.home_announcements = []
+                inst.fetch_weekly_schedule.return_value = []
+                inst.fetch_exam_schedule.return_value = []
+                self.assertEqual(run_once(cfg), 0)
+                self.assertEqual(inst.fetch_weekly_schedule.call_count, 1)
+
+    def test_weekly_briefing_sunday_evening_and_monday_early_catchup(self) -> None:
+        def _make_cfg(state_path: Path) -> Config:
+            return Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=False,
+                enable_dining=False,
+                enable_weather=False,
+                enable_calendar=False,
+                enable_announcements=False,
+                enable_schedule=False,
+                enable_exam_schedule=False,
+                enable_weekly_briefing=True,
+                weekly_briefing_hour=20,
+                enable_commands=False,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            cfg = _make_cfg(state_path)
+
+            # Pazar 04:06 TR -> henüz brifing saati değil, gönderilmemeli
+            sun_early = datetime(2026, 11, 22, 4, 6, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=sun_early),
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 0)
+
+            # Pazar 20:23 TR -> gönderilmeli ve 2026-W47 kaydedilmeli
+            sun_evening = datetime(2026, 11, 22, 20, 23, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=sun_evening),
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 1)
+            saved = load_state(state_path)
+            assert saved is not None
+            self.assertEqual(saved["swiss_tool"]["last_weekly_briefing"], "2026-W47")
+
+            # Pazartesi 04:29 TR -> Pazar akşamı zaten gönderildiği için tekrar edilmemeli
+            mon_early = datetime(2026, 11, 23, 4, 29, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=mon_early),
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 0)
+
+        # Pazar 20:23 çalıştırması düştüyse Pazartesi 04:29 TR'de telafi olarak gönderilmeli
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state_catchup.json"
+            cfg = _make_cfg(state_path)
+            mon_early = datetime(2026, 11, 23, 4, 29, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=mon_early),
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 1)
+            saved_c = load_state(state_path)
+            assert saved_c is not None
+            self.assertEqual(saved_c["swiss_tool"]["last_weekly_briefing"], "2026-W47")
+
+        # Pazartesi 08:20 TR -> sabah 06:00 sonrası pencere kapalı olduğundan gönderilmemeli
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state_late.json"
+            cfg = _make_cfg(state_path)
+            mon_morning = datetime(2026, 11, 23, 8, 20, tzinfo=TR_TZ)
+            with (
+                patch("src.main.now_tr", return_value=mon_morning),
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 0)
+
+    def test_weekend_morning_calendar_reminders_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            slot = ScheduleSlot(
+                day_of_week=5,
+                day_name="Cumartesi",
+                start_time="10:00",
+                end_time="11:45",
+                course_code="BPBZ201",
+                course_name="İnternet Programcılığı",
+            )
+            save_state(
+                state_path,
+                {
+                    "schema_version": 1,
+                    "baseline_initialized": True,
+                    "courses": {},
+                    "swiss_tool": {
+                        "schedule_cache": {"updated_date": "2026-11-20", "slots": [slot.to_dict()]},
+                    },
+                },
+            )
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=False,
+                enable_dining=True,
+                enable_weather=True,
+                enable_calendar=True,
+                enable_announcements=False,
+                enable_schedule=True,
+                enable_exam_schedule=False,
+                enable_weekly_briefing=False,
+                enable_commands=False,
+            )
+            sat_dt = datetime(2026, 11, 21, 8, 17, tzinfo=TR_TZ)
+            cal_event = CalendarEvent(
+                event_id="501",
+                title="Ders Kayıt Son Günü",
+                start_date=date(2026, 11, 22),
+                end_date=date(2026, 11, 22),
+                category="Kayıt (İlk / Yenileme)",
+                faculty="Genel",
+                term="2026-2027",
+            )
+            with (
+                patch("src.main.now_tr", return_value=sat_dt),
+                patch("src.main.fetch_calendar_events", return_value=("Genel", "2026-2027", [cal_event])),
+                patch("src.main.fetch_dining_menus") as mock_dining,
+                patch("src.main.fetch_weather_forecast") as mock_weather,
+                patch("src.main.TelegramNotifier") as mock_notifier,
+            ):
+                self.assertEqual(run_once(cfg), 0)
+            self.assertEqual(mock_dining.call_count, 0)
+            self.assertEqual(mock_weather.call_count, 0)
+            self.assertEqual(mock_notifier.return_value.send_message.call_count, 1)
+            self.assertIn("Ders Kayıt Son Günü", mock_notifier.return_value.send_message.call_args[0][0])
+
+
 if __name__ == "__main__":
     unittest.main()

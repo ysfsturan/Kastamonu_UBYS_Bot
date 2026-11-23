@@ -626,13 +626,16 @@ def _run_grades_module(
                     extra_context["active_courses"] = active_sem_courses
                 cached_sched = prev_swiss.get("schedule_cache")
                 sched_cache_ok = _is_date_cache_fresh(cached_sched, today_date, 7)
-                if sched_cache_ok and active_sem_courses and isinstance(cached_sched, dict):
+                if sched_cache_ok and isinstance(cached_sched, dict):
                     cached_slots = [
                         ScheduleSlot.from_dict(s)
                         for s in (cached_sched.get("slots") or [])
                         if isinstance(s, dict)
                     ]
-                    if not cached_slots or not filter_slots_for_active_courses(cached_slots, active_sem_courses):
+                    if not cached_slots or (
+                        active_sem_courses
+                        and not filter_slots_for_active_courses(cached_slots, active_sem_courses)
+                    ):
                         sched_cache_ok = False
                 if config.enable_schedule and not sched_cache_ok:
                     try:
@@ -769,6 +772,16 @@ def _run_dining_module(
         and swiss_state.get("last_dining_date") != today_str
     )
     if not is_due:
+        if today.weekday() >= 5:
+            logger.info("Yemekhane modülü atlandı (hafta sonu).")
+        elif swiss_state.get("last_dining_date") == today_str:
+            logger.info("Yemekhane modülü atlandı (%s için zaten gönderildi).", today_str)
+        else:
+            logger.info(
+                "Yemekhane modülü atlandı (bildirim saati %02d:00 öncesi, şu an %s TR).",
+                config.dining_notify_hour,
+                current_dt.strftime("%H:%M"),
+            )
         return True, False, None
 
     try:
@@ -803,8 +816,51 @@ def _run_dining_module(
     logger.info("Yemekhane menüsü Telegram'a gönderildi (%s).", menu.menu_date.isoformat())
     if not is_next_preview:
         swiss_state["last_dining_date"] = today_str
+        if weather is not None:
+            swiss_state["last_weather_date"] = today_str
         return True, True, weather
     return True, False, weather
+
+
+def _run_weather_module(
+    config: Config,
+    swiss_state: dict[str, Any],
+    current_dt: datetime,
+    existing_weather: Optional[WeatherForecast] = None,
+    force_daily: bool = False,
+) -> tuple[bool, Optional[WeatherForecast]]:
+    """Yemekhane kapalıysa veya bugün menü yoksa hafta içi günde bir kez bağımsız hava durumu gönderir."""
+    today = current_dt.date()
+    today_str = today.isoformat()
+
+    if not force_daily and swiss_state.get("last_weather_date") == today_str:
+        logger.info("Hava durumu modülü atlandı (%s için zaten gönderildi).", today_str)
+        return False, existing_weather
+
+    is_due = force_daily or (
+        today.weekday() < 5
+        and current_dt.hour >= config.dining_notify_hour
+    )
+    if not is_due:
+        if today.weekday() >= 5:
+            logger.info("Hava durumu modülü atlandı (hafta sonu).")
+        else:
+            logger.info(
+                "Hava durumu modülü atlandı (bildirim saati %02d:00 öncesi, şu an %s TR).",
+                config.dining_notify_hour,
+                current_dt.strftime("%H:%M"),
+            )
+        return False, existing_weather
+
+    weather = existing_weather if existing_weather is not None else _get_weather_safe(config)
+    if weather is None:
+        return False, None
+
+    if _send_telegram_safe(config, format_weather_report(weather)):
+        swiss_state["last_weather_date"] = today_str
+        logger.info("Kampüs hava durumu Telegram'a gönderildi (%s).", today_str)
+        return True, weather
+    return False, weather
 
 
 def _prune_old_milestones(sent_milestones: dict[str, str], today: date) -> dict[str, str]:
@@ -834,6 +890,14 @@ def _run_calendar_module(
         and swiss_state.get("last_calendar_check_date") != today_str
     )
     if not is_due:
+        if swiss_state.get("last_calendar_check_date") == today_str:
+            logger.info("Akademik takvim modülü atlandı (%s için zaten kontrol edildi).", today_str)
+        else:
+            logger.info(
+                "Akademik takvim modülü atlandı (bildirim saati %02d:00 öncesi, şu an %s TR).",
+                config.calendar_notify_hour,
+                current_dt.strftime("%H:%M"),
+            )
         return True, False
 
     try:
@@ -855,6 +919,8 @@ def _run_calendar_module(
     )
 
     delivery_failed = False
+    reminders_sent = False
+    weekly_sent = False
 
     reminders = find_milestone_reminders(
         events=events,
@@ -867,6 +933,7 @@ def _run_calendar_module(
         if _send_telegram_safe(config, msg):
             for ev, days_until in reminders:
                 sent_milestones[milestone_key_for(ev, days_until)] = today_str
+            reminders_sent = True
             logger.info("%d akademik takvim hatırlatması gönderildi.", len(reminders))
         else:
             delivery_failed = True
@@ -896,9 +963,13 @@ def _run_calendar_module(
             )
             if _send_telegram_safe(config, digest_msg):
                 swiss_state["last_calendar_weekly"] = iso_week_str
+                weekly_sent = True
                 logger.info("Haftalık akademik takvim özeti gönderildi (%s).", iso_week_str)
             else:
                 delivery_failed = True
+
+    if not reminders_sent and not weekly_sent and not delivery_failed:
+        logger.info("Akademik takvim kontrol edildi (%d etkinlik); bugün için yeni hatırlatma yok.", len(events))
 
     swiss_state["sent_calendar_milestones"] = sent_milestones
     if not delivery_failed:
@@ -969,6 +1040,7 @@ def _run_announcements_module(
             combined.append(item)
 
     if not combined:
+        logger.info("Duyuru modülü: kaynaklardan duyuru alınamadı.")
         return False, []
 
     prev_ids = swiss_state.get("seen_announcement_ids")
@@ -993,6 +1065,7 @@ def _run_announcements_module(
 
     # Yeni bildirim olmasa bile filtre dışında kalan ID'leri işaretle
     unseen_all = [a.announcement_id for a in combined if a.announcement_id not in seen_set]
+    logger.info("Duyuru modülü: %d duyuru tarandı, yeni duyuru yok.", len(combined))
     if unseen_all:
         swiss_state["seen_announcement_ids"] = list(dict.fromkeys(unseen_all + [str(x) for x in prev_ids]))[:200]
         return True, combined
@@ -1007,16 +1080,19 @@ def _run_materials_module(
     """Ders içine yüklenen yeni dosya/ödev/duyuruları algılar -> state_dirty."""
     all_mats: list[CourseMaterial] = [m for c in courses for m in c.materials]
     if not all_mats:
+        logger.info("Materyal modülü: kayıtlı ders materyali/ödevi yok.")
         return False
 
     prev_ids = swiss_state.get("seen_material_ids")
     if not isinstance(prev_ids, list):
         swiss_state["seen_material_ids"] = [m.material_id for m in all_mats][:300]
+        logger.info("Materyal başlangıç durumu kaydedildi (%d öğe).", len(all_mats))
         return True
 
     seen_set = {str(x) for x in prev_ids}
     new_mats = [m for m in all_mats if m.material_id not in seen_set]
     if not new_mats:
+        logger.info("Materyal modülü: %d öğe kontrol edildi, yeni dosya/ödev yok.", len(all_mats))
         return False
 
     if _send_telegram_safe(config, format_material_alerts(new_mats, config.ubys_base_url)):
@@ -1040,7 +1116,7 @@ def _run_schedule_and_exams_module(
     dirty = False
 
     slots: list[ScheduleSlot] = []
-    if "schedule" in ubys_extras and isinstance(ubys_extras["schedule"], list):
+    if isinstance(ubys_extras.get("schedule"), list) and ubys_extras["schedule"]:
         slots = ubys_extras["schedule"]
         swiss_state["schedule_cache"] = {
             "updated_date": today_str,
@@ -1054,21 +1130,37 @@ def _run_schedule_and_exams_module(
         if slots and isinstance(active_c, list) and active_c:
             slots = filter_slots_for_active_courses(slots, active_c)
 
-    if config.enable_schedule and slots:
-        due_schedule = force_daily or (
-            today.weekday() < 5
-            and current_dt.hour >= config.schedule_notify_hour
-            and swiss_state.get("last_schedule_date") != today_str
-        )
-        if due_schedule:
-            today_slots = get_slots_for_day(slots, today)
-            if today_slots or force_daily:
-                if _send_telegram_safe(config, format_daily_schedule(today_slots, today, config.ubys_base_url)):
-                    swiss_state["last_schedule_date"] = today_str
-                    dirty = True
+    if config.enable_schedule:
+        if not slots:
+            logger.info("Ders programı modülü: ÜBYS veya önbellekte kayıtlı ders programı bulunamadı.")
+        else:
+            due_schedule = force_daily or (
+                today.weekday() < 5
+                and current_dt.hour >= config.schedule_notify_hour
+                and swiss_state.get("last_schedule_date") != today_str
+            )
+            if due_schedule:
+                today_slots = get_slots_for_day(slots, today)
+                if today_slots or force_daily:
+                    if _send_telegram_safe(config, format_daily_schedule(today_slots, today, config.ubys_base_url)):
+                        swiss_state["last_schedule_date"] = today_str
+                        logger.info("Günlük ders programı Telegram'a gönderildi (%d ders saati).", len(today_slots))
+                        dirty = True
+                else:
+                    logger.info("Ders programı modülü: bugün (%s) için ders yok.", today_str)
+            elif today.weekday() >= 5:
+                logger.info("Ders programı modülü atlandı (hafta sonu).")
+            elif swiss_state.get("last_schedule_date") == today_str:
+                logger.info("Ders programı modülü atlandı (%s için zaten gönderildi).", today_str)
+            else:
+                logger.info(
+                    "Ders programı modülü atlandı (bildirim saati %02d:00 öncesi, şu an %s TR).",
+                    config.schedule_notify_hour,
+                    current_dt.strftime("%H:%M"),
+                )
 
     exams: list[ExamScheduleItem] = []
-    if "exams" in ubys_extras and isinstance(ubys_extras["exams"], list):
+    if isinstance(ubys_extras.get("exams"), list) and ubys_extras["exams"]:
         exams = ubys_extras["exams"]
         swiss_state["exam_schedule_cache"] = {
             "updated_date": today_str,
@@ -1079,15 +1171,24 @@ def _run_schedule_and_exams_module(
         raw_exams = swiss_state["exam_schedule_cache"].get("exams") or []
         exams = [ExamScheduleItem.from_dict(e) for e in raw_exams if isinstance(e, dict)]
 
-    if config.enable_exam_schedule and exams:
-        sent_ex = _prune_old_milestones(dict(swiss_state.get("sent_exam_reminders") or {}), today)
-        reminders = find_exam_reminders(exams, today, config.exam_reminder_days, sent_ex)
-        if reminders:
-            if _send_telegram_safe(config, format_exam_reminders(reminders, config.ubys_base_url)):
-                for ex, days_until in reminders:
-                    sent_ex[exam_reminder_key(ex, days_until)] = today_str
-                swiss_state["sent_exam_reminders"] = sent_ex
-                dirty = True
+    if config.enable_exam_schedule:
+        if not exams:
+            logger.info("Sınav takvimi modülü: ÜBYS veya önbellekte yaklaşan sınav kaydı bulunamadı.")
+        else:
+            sent_ex = _prune_old_milestones(dict(swiss_state.get("sent_exam_reminders") or {}), today)
+            reminders = find_exam_reminders(exams, today, config.exam_reminder_days, sent_ex)
+            if reminders:
+                if _send_telegram_safe(config, format_exam_reminders(reminders, config.ubys_base_url)):
+                    for ex, days_until in reminders:
+                        sent_ex[exam_reminder_key(ex, days_until)] = today_str
+                    swiss_state["sent_exam_reminders"] = sent_ex
+                    logger.info("%d yaklaşan sınav hatırlatması gönderildi.", len(reminders))
+                    dirty = True
+            else:
+                logger.info(
+                    "Sınav takvimi modülü: %d sınav kontrol edildi, bugün için yeni hatırlatma yok.",
+                    len(exams),
+                )
 
     return dirty, slots, exams
 
@@ -1103,17 +1204,33 @@ def _run_weekly_briefing_module(
     weather: Optional[WeatherForecast],
     force_daily: bool = False,
 ) -> bool:
-    """Pazar akşamı haftalık toplu öğrenci brifingi gönderir -> state_dirty."""
+    """Pazar akşamı (veya düşerse Pazartesi sabaha karşı telafi) haftalık toplu öğrenci brifingi gönderir -> state_dirty."""
     today = current_dt.date()
-    iso_year, iso_week, _ = today.isocalendar()
+    is_sunday_evening = today.weekday() == 6 and current_dt.hour >= config.weekly_briefing_hour
+    is_monday_early_catchup = today.weekday() == 0 and current_dt.hour < 6
+    briefing_week_date = (
+        (today - timedelta(days=1))
+        if (not force_daily and is_monday_early_catchup)
+        else today
+    )
+    iso_year, iso_week, _ = briefing_week_date.isocalendar()
     iso_week_str = f"{iso_year}-W{iso_week:02d}"
 
     is_due = force_daily or (
-        today.weekday() == 6
-        and (current_dt.hour >= config.weekly_briefing_hour or current_dt.hour < 4)
+        (is_sunday_evening or is_monday_early_catchup)
         and swiss_state.get("last_weekly_briefing") != iso_week_str
     )
     if not is_due:
+        if swiss_state.get("last_weekly_briefing") == iso_week_str and (
+            is_sunday_evening or is_monday_early_catchup
+        ):
+            logger.info("Haftalık brifing atlandı (%s için zaten gönderildi).", iso_week_str)
+        else:
+            logger.info(
+                "Haftalık brifing atlandı (Pazar %02d:00+ bekleniyor; şu an %s TR).",
+                config.weekly_briefing_hour,
+                current_dt.strftime("%Y-%m-%d %H:%M"),
+            )
         return False
 
     if weather is None and config.enable_weather:
@@ -2003,6 +2120,7 @@ def run_once(
             state_dirty = True
 
     current_dt = now_tr()
+    logger.info("Kontrol zamanı (TR): %s", current_dt.strftime("%Y-%m-%d %H:%M"))
     swiss_state = dict(working_state.get("swiss_tool") or {})
     if "total_credit" in ubys_extras and ubys_extras["total_credit"] is not None:
         swiss_state["last_total_credit"] = float(ubys_extras["total_credit"])
@@ -2018,10 +2136,17 @@ def run_once(
             practice_min_pct=config.practice_min_attendance,
         )
         prev_attendance = swiss_state.get("attendance")
+        alerts_sent = 0
         if isinstance(prev_attendance, dict):
             alerts = diff_attendance(prev_attendance, attendance_reports)
             if alerts:
-                _send_telegram_safe(config, format_attendance_alerts(alerts, config.ubys_base_url))
+                if _send_telegram_safe(config, format_attendance_alerts(alerts, config.ubys_base_url)):
+                    alerts_sent = len(alerts)
+        logger.info(
+            "Devamsızlık modülü: %d ders değerlendirildi (%s).",
+            len(attendance_reports),
+            f"{alerts_sent} uyarı gönderildi" if alerts_sent else "yeni değişiklik yok",
+        )
         swiss_state["attendance"] = build_attendance_snapshot(attendance_reports)
         working_state["swiss_tool"] = swiss_state
         state_dirty = True
@@ -2038,6 +2163,9 @@ def run_once(
                 config,
                 format_gano_change(float(prev_gano), float(last_home_gano), config.ubys_base_url),
             )
+            logger.info("GANO değişikliği bildirildi: %.2f -> %.2f", float(prev_gano), float(last_home_gano))
+        else:
+            logger.info("Transkript / GANO kontrol edildi (%.2f).", float(last_home_gano))
         swiss_state["last_gano"] = float(last_home_gano)
         working_state["swiss_tool"] = swiss_state
         state_dirty = True
@@ -2052,6 +2180,18 @@ def run_once(
             force_daily=force_daily,
         )
         if dining_dirty:
+            working_state["swiss_tool"] = swiss_state
+            state_dirty = True
+
+    if config.enable_weather and not (dining_ok and weather is not None):
+        weather_dirty, weather = _run_weather_module(
+            config,
+            swiss_state,
+            current_dt,
+            existing_weather=weather,
+            force_daily=force_daily,
+        )
+        if weather_dirty:
             working_state["swiss_tool"] = swiss_state
             state_dirty = True
 
@@ -2094,7 +2234,7 @@ def run_once(
 
     schedule_slots: list[ScheduleSlot] = []
     exam_items: list[ExamScheduleItem] = []
-    if grades_ok and (config.enable_schedule or config.enable_exam_schedule):
+    if config.enable_schedule or config.enable_exam_schedule:
         sched_dirty, schedule_slots, exam_items = _run_schedule_and_exams_module(
             config,
             swiss_state,
@@ -2139,7 +2279,9 @@ def run_once(
                 cmd_ctx["schedule"] = schedule_slots
             if exam_items:
                 cmd_ctx["exams"] = exam_items
-            _, cmd_dirty = process_telegram_commands(config, swiss_state, cmd_ctx, poll_timeout=0)
+            handled_cmds, cmd_dirty = process_telegram_commands(config, swiss_state, cmd_ctx, poll_timeout=0)
+            if handled_cmds == 0:
+                logger.info("Telegram komutları kontrol edildi (bekleyen komut yok).")
             if cmd_dirty:
                 working_state["swiss_tool"] = swiss_state
                 state_dirty = True
