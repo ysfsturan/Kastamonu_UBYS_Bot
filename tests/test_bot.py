@@ -76,7 +76,13 @@ from src.grade_calculator import (
     resolve_course_weights,
     score_to_letter,
 )
-from src.main import TR_TZ, main as cli_main, run_once
+from src.main import TR_TZ, main as cli_main, parse_args, run_once
+from src.server import (
+    HealthState,
+    compute_next_check_delay,
+    compute_next_weekday_morning,
+    create_health_server,
+)
 from src.models import (
     Announcement,
     CalendarEvent,
@@ -3038,6 +3044,170 @@ class ModuleSchedulingAndIndependenceTests(unittest.TestCase):
             self.assertEqual(mock_weather.call_count, 0)
             self.assertEqual(mock_notifier.return_value.send_message.call_count, 1)
             self.assertIn("Ders Kayıt Son Günü", mock_notifier.return_value.send_message.call_args[0][0])
+
+
+class RenderServeModeTests(unittest.TestCase):
+    def test_compute_next_weekday_morning_skips_weekends(self) -> None:
+        # Pazartesi 07:45 -> aynı gün Pazartesi 08:00:05
+        mon_early = datetime(2026, 11, 23, 7, 45, tzinfo=TR_TZ)
+        self.assertEqual(
+            compute_next_weekday_morning(mon_early, 8),
+            datetime(2026, 11, 23, 8, 0, 5, tzinfo=TR_TZ),
+        )
+
+        # Pazartesi 08:01 -> Salı 08:00:05
+        mon_after = datetime(2026, 11, 23, 8, 1, tzinfo=TR_TZ)
+        self.assertEqual(
+            compute_next_weekday_morning(mon_after, 8),
+            datetime(2026, 11, 24, 8, 0, 5, tzinfo=TR_TZ),
+        )
+
+        # Cuma 08:10 -> Pazartesi 08:00:05 (Cumartesi & Pazar atlanır)
+        fri_after = datetime(2026, 11, 27, 8, 10, tzinfo=TR_TZ)
+        self.assertEqual(
+            compute_next_weekday_morning(fri_after, 8),
+            datetime(2026, 11, 30, 8, 0, 5, tzinfo=TR_TZ),
+        )
+
+        # Cumartesi 07:00 -> Pazartesi 08:00:05
+        sat_early = datetime(2026, 11, 28, 7, 0, tzinfo=TR_TZ)
+        self.assertEqual(
+            compute_next_weekday_morning(sat_early, 8),
+            datetime(2026, 11, 30, 8, 0, 5, tzinfo=TR_TZ),
+        )
+
+        # Pazar 23:00 -> Pazartesi 08:00:05
+        sun_late = datetime(2026, 11, 29, 23, 0, tzinfo=TR_TZ)
+        self.assertEqual(
+            compute_next_weekday_morning(sun_late, 8),
+            datetime(2026, 11, 30, 8, 0, 5, tzinfo=TR_TZ),
+        )
+
+    def test_compute_next_check_delay_hits_morning_exactly(self) -> None:
+        # 07:50 + 20 dk = 08:10 ama 08:00:05 daha erken olduğu için "morning" seçilmeli
+        dt_before = datetime(2026, 11, 25, 7, 50, 0, tzinfo=TR_TZ)
+        delay, target, reason = compute_next_check_delay(dt_before, interval_minutes=20, morning_hour=8)
+        self.assertEqual(reason, "morning")
+        self.assertEqual(target, datetime(2026, 11, 25, 8, 0, 5, tzinfo=TR_TZ))
+        self.assertAlmostEqual(delay, 605.0, places=3)
+
+        # 08:01'de ertesi sabah 08:00 yerine 20 dk sonrası ("interval") seçilmeli
+        dt_after = datetime(2026, 11, 25, 8, 1, 0, tzinfo=TR_TZ)
+        delay2, target2, reason2 = compute_next_check_delay(dt_after, interval_minutes=20, morning_hour=8)
+        self.assertEqual(reason2, "interval")
+        self.assertEqual(target2, datetime(2026, 11, 25, 8, 21, 0, tzinfo=TR_TZ))
+        self.assertAlmostEqual(delay2, 1200.0, places=3)
+
+    def test_health_server_get_and_head_endpoints(self) -> None:
+        import threading
+
+        hs = HealthState(started_at=datetime(2026, 11, 25, 1, 0, 0, tzinfo=TR_TZ))
+        hs.record_check(datetime(2026, 11, 25, 1, 5, 0, tzinfo=TR_TZ), ok=True)
+        hs.set_next_check(datetime(2026, 11, 25, 8, 0, 5, tzinfo=TR_TZ), "morning")
+        hs.add_commands(3)
+
+        server = create_health_server(0, hs, host="127.0.0.1")
+        port = server.server_port
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                r_root = client.get(f"http://127.0.0.1:{port}/")
+                self.assertEqual(r_root.status_code, 200)
+                data = r_root.json()
+                self.assertEqual(data["status"], "ok")
+                self.assertEqual(data["mode"], "serve")
+                self.assertTrue(data["last_check_ok"])
+                self.assertEqual(data["next_check_reason"], "morning")
+                self.assertEqual(data["commands_handled"], 3)
+
+                r_health = client.get(f"http://127.0.0.1:{port}/health")
+                self.assertEqual(r_health.status_code, 200)
+
+                r_head = client.head(f"http://127.0.0.1:{port}/health")
+                self.assertEqual(r_head.status_code, 200)
+                self.assertEqual(r_head.content, b"")
+
+                r_missing = client.get(f"http://127.0.0.1:{port}/unknown")
+                self.assertEqual(r_missing.status_code, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=2.0)
+
+    def test_run_once_preserves_command_cursor_when_run_commands_false(self) -> None:
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            save_state(
+                state_path,
+                {
+                    "schema_version": 1,
+                    "baseline_initialized": True,
+                    "courses": {},
+                    "swiss_tool": {
+                        "telegram_last_update_id": 100,
+                        "telegram_commands_version": 1,
+                    },
+                },
+            )
+            cfg = Config(
+                ubys_username="221234567",
+                ubys_password="secret",
+                telegram_bot_token="token",
+                telegram_chat_ids=["12345"],
+                state_file=state_path,
+                enable_grades=False,
+                enable_dining=True,
+                enable_weather=False,
+                enable_calendar=False,
+                enable_announcements=False,
+                enable_schedule=False,
+                enable_exam_schedule=False,
+                enable_weekly_briefing=False,
+                enable_commands=True,
+            )
+
+            lock = threading.Lock()
+            cursor = {"telegram_last_update_id": 250, "telegram_commands_version": 2}
+            swiss_out: dict[str, object] = {}
+            mon_dt = datetime(2026, 11, 23, 8, 5, tzinfo=TR_TZ)
+            menu = DailyMenu(
+                menu_date=date(2026, 11, 23),
+                items=[DiningItem(name="Mercimek Ç.", calories="120 kkal", category="Çorba")],
+            )
+
+            with (
+                patch("src.main.now_tr", return_value=mon_dt),
+                patch("src.main.fetch_dining_menus", return_value=[menu]),
+                patch("src.main.process_telegram_commands") as mock_cmds,
+                patch("src.main.TelegramNotifier"),
+            ):
+                rc = run_once(
+                    cfg,
+                    run_commands=False,
+                    state_lock=lock,
+                    command_cursor=cursor,
+                    swiss_state_out=swiss_out,
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(mock_cmds.call_count, 0)
+            saved = load_state(state_path)
+            assert saved is not None
+            self.assertEqual(saved["swiss_tool"]["telegram_last_update_id"], 250)
+            self.assertEqual(saved["swiss_tool"]["telegram_commands_version"], 2)
+            self.assertEqual(swiss_out["telegram_last_update_id"], 250)
+
+    def test_cli_parse_serve_and_port(self) -> None:
+        args_default = parse_args(["--serve"])
+        self.assertTrue(args_default.serve)
+        self.assertIsNone(args_default.port)
+
+        args_port = parse_args(["--serve", "--port", "8080"])
+        self.assertTrue(args_port.serve)
+        self.assertEqual(args_port.port, 8080)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,14 @@
 # 🎓 Kastamonu Üniversitesi Öğrenci Asistanı (Telegram Botu)
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
-![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Otomatik%20%C3%9Ccretsiz-2088FF?logo=githubactions&logoColor=white)
+![Render](https://img.shields.io/badge/Render-7%2F24%20%C3%9Ccretsiz-46E3B7?logo=render&logoColor=black)
 ![Telegram](https://img.shields.io/badge/Telegram-Anl%C4%B1k%20Bildirim-26A5E4?logo=telegram&logoColor=white)
 ![Lisans](https://img.shields.io/badge/Lisans-GPL--3.0-green)
 
-Kastamonu Üniversitesi'nin **tüm fakülte, yüksekokul, meslek yüksekokulu (MYO) ve enstitü** öğrencileri için geliştirilmiş; bilgisayar veya sunucu açık bırakmadan tamamen ücretsiz bulutta (`GitHub Actions`) çalışan otomatik Telegram asistanı.  
+Kastamonu Üniversitesi'nin **tüm fakülte, yüksekokul, meslek yüksekokulu (MYO) ve enstitü** öğrencileri için geliştirilmiş; bilgisayar veya sunucu açık bırakmadan bulutta (**Render** üzerinde 7/24) çalışan otomatik Telegram asistanı.  
 Öğrencinin kayıtlı olduğu **fakülte/bölüm ve aktif sınıfı/dönemi otomatik tanıyarak** sınav notu girildiğinde sınıf ortalaması ve final hedefleriyle Telegram'a bildirir; yanında gün bazlı devamsızlık takibi, aktif dönem transkript/GANO özeti, günlük ders programı, bölüm sınav PDF'leri, yemekhane menüsü ve akademik takvim hatırlatmalarını cebine getirir.
 
-> **Hızlı Geçiş:** [Ne İşe Yarar?](#-ne-i%CC%87%C5%9Fe-yarar) • [Örnek Mesajlar](#-telegramda-nas%C4%B1l-g%C3%B6r%C3%BCn%C3%BCr) • [Telegram Komutları](#-telegram-bot-komutlar%C4%B1-) • [5 Dakikada Kurulum](#-5-dakikada-%C3%BCcretsiz-kurulum-ad%C4%B1m-ad%C4%B1m) • [Tek Tıkla Kullanım](#%EF%B8%8F-i%CC%87stedi%C4%9Fin-zaman-tek-t%C4%B1kla-%C3%A7al%C4%B1%C5%9Ft%C4%B1rma-run-workflow) • [Özelleştirme](#%EF%B8%8F-i%CC%87ste%C4%9Fe-ba%C4%9Fl%C4%B1-%C3%B6zelle%C5%9Ftirmeler-variables) • [Güvenlik](#-g%C3%BCvenlik-ve-gizlilik-%C5%9Fifrem-g%C3%BCvende-mi) • [Sorun Giderme](#-s%C4%B1k-sorulan-sorular-ve-sorun-giderme) • [Yerel / Docker](#-kendi-bilgisayar%C4%B1nda--docker-ile-%C3%A7al%C4%B1%C5%9Ft%C4%B1rma-geli%C5%9Ftiriciler-i%CC%87%C3%A7in)
+> **Hızlı Geçiş:** [Ne İşe Yarar?](#-ne-i%CC%87%C5%9Fe-yarar) • [Örnek Mesajlar](#-telegramda-nas%C4%B1l-g%C3%B6r%C3%BCn%C3%BCr) • [Telegram Komutları](#-telegram-bot-komutlar%C4%B1-) • [Render 7/24 Kurulum](#-render-ile-724-%C3%BCcretsiz-kurulum-önerilen) • [GitHub Actions (Manuel)](#-5-dakikada-%C3%BCcretsiz-kurulum-adım-adım) • [Özelleştirme](#%EF%B8%8F-i%CC%87ste%C4%9Fe-ba%C4%9Fl%C4%B1-%C3%B6zelle%C5%9Ftirmeler-variables) • [Güvenlik](#-g%C3%BCvenlik-ve-gizlilik-%C5%9Fifrem-g%C3%BCvende-mi) • [Sorun Giderme](#-s%C4%B1k-sorulan-sorular-ve-sorun-giderme) • [Yerel / Docker](#-kendi-bilgisayar%C4%B1nda--docker-ile-%C3%A7al%C4%B1%C5%9Ft%C4%B1rma-geli%C5%9Ftiriciler-i%CC%87%C3%A7in)
 
 ---
 
@@ -84,7 +84,7 @@ Kastamonu Üniversitesi'nin **tüm fakülte, yüksekokul, meslek yüksekokulu (M
 
 ## 💬 Telegram Bot Komutları (`/`)
 
-Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(GitHub Actions modunda zamanlanmış çalışma saatlerinde — hafta içi her sabah `08:00`, hafta sonları hariç `08:17` yedekli — yanıtlanır; bilgisayar/VPS üzerinde `--listen` ile çalıştırırsan saniyesinde yanıt verir)*:
+Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(Render üzerinde `--serve` ile çalışırken **saniyesinde** anlık yanıt verir; bilgisayar/VPS üzerinde `--listen` ile de aynı anlık dinleyiciyi kullanabilirsin)*:
 
 | Komut | Açıklama |
 | --- | --- |
@@ -103,6 +103,25 @@ Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(Git
 | `/ozet` | Haftalık toplu öğrenci brifingini oluşturur |
 
 *(Güvenlik nedeniyle bot yalnızca senin `TELEGRAM_CHAT_ID` hesabından gelen komutlara yanıt verir.)*
+
+---
+
+## ☁️ Render ile 7/24 Ücretsiz Kurulum (Önerilen)
+
+GitHub Actions zamanlamaları yoğunlukta saatlerce gecikebildiği için otomatik çalışma **Render** (`--serve` kipi) üzerine taşınmıştır. Bu kipte:
+- 💬 Telegram `/` komutları (`getUpdates` long polling) **7/24 saniyesinde** yanıtlanır.
+- ⏰ Hafta içi her sabah **tam `08:00` TR** (Pazartesi–Cuma, hafta sonları hariç) yemekhane menüsü, kampüs hava durumu, günlük ders programı ve akademik takvim gönderilir.
+- 🔔 Gün boyu her `20` dakikada bir (`CHECK_INTERVAL_MINUTES`) yeni not, duyuru, materyal ve devamsızlık kontrolü yapılır.
+- 🩺 Dahili `/health` HTTP ucu sayesinde Render Web Service sağlık kontrolü ve ücretsiz keep-alive ping'leri desteklenir.
+
+1. Önce aşağıdaki **Adım 2** ve **Adım 3**'ü tamamlayarak `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GIST_ID` ve `GIST_TOKEN` bilgilerini hazırla.
+2. [Render Dashboard](https://dashboard.render.com/) üzerinden **New + → Blueprint** (veya **Web Service**) seçip bu GitHub deponu bağla. Depodaki [render.yaml](render.yaml) ayarları otomatik okunur:
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `python -m src.main --serve`
+   - **Health Check Path:** `/health`
+3. Render servisinin **Environment** sekmesine şu 6 değişkeni ekle:
+   - `UBYS_USERNAME`, `UBYS_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GIST_ID`, `GIST_TOKEN`
+4. **Önemli (Ücretsiz Planda Uyumayı Önleme):** Render Free Web Service 15 dakika HTTP trafiği almazsa uyku moduna geçer. Ücretsiz bir izleme servisinden (**UptimeRobot** veya **cron-job.org**) her **5–10 dakikada bir** `https://<servis-adin>.onrender.com/health` adresine `GET` veya `HEAD` isteği atacak şekilde monitör ekle. Böylece bot 7/24 uyanık kalır, `/` komutlarına anında yanıt verir ve hafta içi tam `08:00` TR'de sabah bildirimlerini atar.
 
 ---
 
@@ -163,7 +182,7 @@ Kendi `Fork`ladığın deponun sayfasına dön:
    - Yeşil **Run workflow** düğmesine bas.
 5. Yaklaşık **1 dakika** içinde Telegram'a ders notların, gün bazlı devamsızlık hakların, transkript özetin, günün yemek listesi ve yaklaşan akademik takvim etkinliklerin gelecektir! 🎉
 
-Bot bundan sonra **hafta içi her sabah Türkiye saatiyle `08:00`'de** (hafta sonları hariç; GitHub Actions gecikmelerine karşı `08:17` yedekli) otomatik olarak çalışır.
+> **Not:** GitHub Actions üzerindeki otomatik `schedule` tetikleyicisi Render ile çakışmaması ve gecikme yaşamaması için kaldırılmıştır; Actions sekmesi artık yalnızca aşağıdaki **Run workflow** düğmesiyle tek seferlik manuel test/kontrol için kullanılır.
 
 ---
 
@@ -322,6 +341,7 @@ copy .env.example .env   # Linux/macOS: cp .env.example .env
 | `python -m src.main --briefing` | Haftalık toplu öğrenci brifingini oluşturur |
 | `python -m src.main --commands` | Telegram'da bekleyen `/` komutlarını tek seferde yanıtlar |
 | `python -m src.main --listen` | Telegram komutları için anlık sürekli dinleyici (`long polling`) başlatır |
+| `python -m src.main --serve` | Render/bulut için 7/24 zamanlayıcı + anlık Telegram komutları + `/health` sunucusu başlatır |
 | `python -m src.main --test` | Etkin tüm modülleri durum dosyasını bozmadan test eder (`--notify-test` ile Telegram'a atar) |
 | `python -m src.main --once` | Tek seferlik tam kontrol + durum kaydı yapar |
 | `python -m src.main --loop` | Belirlenen aralıklarla (`CHECK_INTERVAL_MINUTES`) sürekli çalışır |

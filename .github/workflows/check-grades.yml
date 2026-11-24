@@ -1,12 +1,8 @@
 name: Kastamonu ÜBYS Swiss Bot
 
 on:
-  schedule:
-    # Hafta içi her sabah Türkiye saatiyle 08:00 (UTC 05:00, Pazartesi-Cuma; hafta sonları hariç)
-    - cron: '0 5 * * 1-5'
-    # GitHub Actions :00 yoğunluğunda 08:00 koşumu düşerse yedek: 08:17 TR (Pazartesi-Cuma; tekrar bildirim atmaz)
-    - cron: '17 5 * * 1-5'
-
+  # Otomatik 7/24 çalışma ve hafta içi 08:00 TR bildirimleri Render (--serve) üzerine taşındı.
+  # GitHub Actions yalnızca isteğe bağlı manuel çalıştırma (workflow_dispatch) için tutulur.
   workflow_dispatch:
     inputs:
       mode:

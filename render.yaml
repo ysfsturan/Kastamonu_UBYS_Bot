@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: kastamonu-ubys-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m src.main --serve
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: UBYS_USERNAME
+        sync: false
+      - key: UBYS_PASSWORD
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: GIST_ID
+        sync: false
+      - key: GIST_TOKEN
+        sync: false
+      - key: CHECK_INTERVAL_MINUTES
+        value: "20"
+      - key: DINING_NOTIFY_HOUR
+        value: "8"
+      - key: CALENDAR_NOTIFY_HOUR
+        value: "8"
+      - key: SCHEDULE_NOTIFY_HOUR
+        value: "8"
+      - key: ENABLE_COMMANDS
+        value: "true"
+      - key: ENABLE_WEEKLY_BRIEFING
+        value: "false"

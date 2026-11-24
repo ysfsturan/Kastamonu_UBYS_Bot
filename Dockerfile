@@ -11,4 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 COPY data ./data
 
-CMD ["python", "-m", "src.main", "--loop"]
+EXPOSE 10000
+
+CMD ["python", "-m", "src.main", "--serve"]

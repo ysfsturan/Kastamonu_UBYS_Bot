@@ -7,6 +7,7 @@ import copy
 import logging
 import random
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -2074,6 +2075,10 @@ def run_once(
     notify_test: bool = False,
     dump_html: bool = False,
     force_daily: bool = False,
+    run_commands: bool = True,
+    state_lock: Optional[threading.Lock] = None,
+    command_cursor: Optional[dict[str, Any]] = None,
+    swiss_state_out: Optional[dict[str, Any]] = None,
 ) -> int:
     """Etkinleştirilmiş tüm modülleri çalıştırır; çıkış kodu döner (0 başarılı, 1 hatalı)."""
     if test_mode:
@@ -2087,7 +2092,11 @@ def run_once(
     )
     logger.info("Durum deposu: %s", state_store.description)
     try:
-        loaded_state = state_store.load()
+        if state_lock is not None:
+            with state_lock:
+                loaded_state = state_store.load()
+        else:
+            loaded_state = state_store.load()
     except StateStorageError as exc:
         logger.error("Durum okunamadı: %s", exc)
         _send_telegram_safe(config, format_error_alert("GitHub Gist / Durum Okuma Hatası", str(exc)))
@@ -2261,7 +2270,7 @@ def run_once(
             working_state["swiss_tool"] = swiss_state
             state_dirty = True
 
-    if config.enable_commands and config.telegram_bot_token and config.telegram_chat_ids:
+    if run_commands and config.enable_commands and config.telegram_bot_token and config.telegram_chat_ids:
         try:
             cmd_ctx: dict[str, Any] = {
                 "today": current_dt.date(),
@@ -2288,10 +2297,40 @@ def run_once(
         except Exception as cmd_exc:
             logger.warning("Telegram komut kontrolü geçici hata verdi: %s", cmd_exc)
 
+    def _merge_command_cursor(target_swiss: dict[str, Any]) -> None:
+        if command_cursor is None:
+            return
+        for c_key in ("telegram_last_update_id", "telegram_commands_version"):
+            if c_key in command_cursor:
+                target_swiss[c_key] = command_cursor[c_key]
+
     if state_dirty:
         working_state["updated_at"] = _utc_now_iso()
-        if not _save_state_safe(config, state_store, working_state):
-            return 1
+        if state_lock is not None:
+            with state_lock:
+                swiss_block = dict(working_state.get("swiss_tool") or {})
+                _merge_command_cursor(swiss_block)
+                working_state["swiss_tool"] = swiss_block
+                swiss_state = swiss_block
+                if not _save_state_safe(config, state_store, working_state):
+                    return 1
+        else:
+            if command_cursor is not None:
+                swiss_block = dict(working_state.get("swiss_tool") or {})
+                _merge_command_cursor(swiss_block)
+                working_state["swiss_tool"] = swiss_block
+                swiss_state = swiss_block
+            if not _save_state_safe(config, state_store, working_state):
+                return 1
+
+    if swiss_state_out is not None:
+        if state_lock is not None:
+            with state_lock:
+                swiss_state_out.clear()
+                swiss_state_out.update(copy.deepcopy(swiss_state))
+        else:
+            swiss_state_out.clear()
+            swiss_state_out.update(copy.deepcopy(swiss_state))
 
     if config.enable_grades:
         return 0 if grades_ok else 1
@@ -2402,6 +2441,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="VPS/Docker/PC için anlık Telegram bot komut dinleyicisini başlatır.",
     )
+    mode_group.add_argument(
+        "--serve",
+        action="store_true",
+        help="Render/bulut için 7/24 zamanlayıcı + anlık Telegram komut dinleyicisi + HTTP /health sunucusu başlatır.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="--serve kipinde HTTP sağlık sunucusu portu (varsayılan: PORT ortam değişkeni veya 10000).",
+    )
     parser.add_argument(
         "--weights",
         metavar="VIZE/FINAL",
@@ -2452,6 +2502,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         require_ubys = True
     elif args.commands or args.listen:
         require_ubys = False
+    elif args.serve:
+        require_ubys = None
     else:
         require_ubys = None
 
@@ -2487,6 +2539,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run_commands_once(config)
     if args.listen:
         return run_listen_loop(config)
+    if args.serve:
+        from .server import run_serve
+
+        return run_serve(config, port=args.port, dump_html=args.dump_html)
     if args.dining:
         return run_dining_preview(config, notify_test=args.notify_test)
     if args.calendar:
