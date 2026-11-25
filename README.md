@@ -2,36 +2,38 @@
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![Render](https://img.shields.io/badge/Render-7%2F24%20%C3%9Ccretsiz-46E3B7?logo=render&logoColor=black)
-![Telegram](https://img.shields.io/badge/Telegram-Anl%C4%B1k%20Bildirim-26A5E4?logo=telegram&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Haz%C4%B1r-2496ED?logo=docker&logoColor=white)
+![Telegram](https://img.shields.io/badge/Telegram-Anl%C4%B1k%20Bot-26A5E4?logo=telegram&logoColor=white)
 ![Lisans](https://img.shields.io/badge/Lisans-GPL--3.0-green)
 
-Kastamonu Üniversitesi'nin **tüm fakülte, yüksekokul, meslek yüksekokulu (MYO) ve enstitü** öğrencileri için geliştirilmiş; bilgisayar veya sunucu açık bırakmadan bulutta (**Render** üzerinde 7/24) çalışan otomatik Telegram asistanı.  
-Öğrencinin kayıtlı olduğu **fakülte/bölüm ve aktif sınıfı/dönemi otomatik tanıyarak** sınav notu girildiğinde sınıf ortalaması ve final hedefleriyle Telegram'a bildirir; yanında gün bazlı devamsızlık takibi, aktif dönem transkript/GANO özeti, günlük ders programı, bölüm sınav PDF'leri, yemekhane menüsü ve akademik takvim hatırlatmalarını cebine getirir.
+Kastamonu Üniversitesi'nin **tüm fakülte, yüksekokul, meslek yüksekokulu (MYO) ve enstitü** öğrencileri için geliştirilmiş; bilgisayar veya sunucu açık bırakmadan bulutta **Render** üzerinde **7/24 ücretsiz** çalışan otomatik Telegram öğrenci asistanı.
 
-> **Hızlı Geçiş:** [Ne İşe Yarar?](#-ne-i%CC%87%C5%9Fe-yarar) • [Örnek Mesajlar](#-telegramda-nas%C4%B1l-g%C3%B6r%C3%BCn%C3%BCr) • [Telegram Komutları](#-telegram-bot-komutlar%C4%B1-) • [Render 7/24 Kurulum](#-render-ile-724-%C3%BCcretsiz-kurulum-önerilen) • [GitHub Actions (Manuel)](#-5-dakikada-%C3%BCcretsiz-kurulum-adım-adım) • [Özelleştirme](#%EF%B8%8F-i%CC%87ste%C4%9Fe-ba%C4%9Fl%C4%B1-%C3%B6zelle%C5%9Ftirmeler-variables) • [Güvenlik](#-g%C3%BCvenlik-ve-gizlilik-%C5%9Fifrem-g%C3%BCvende-mi) • [Sorun Giderme](#-s%C4%B1k-sorulan-sorular-ve-sorun-giderme) • [Yerel / Docker](#-kendi-bilgisayar%C4%B1nda--docker-ile-%C3%A7al%C4%B1%C5%9Ft%C4%B1rma-geli%C5%9Ftiriciler-i%CC%87%C3%A7in)
+Öğrencinin kayıtlı olduğu **fakülte/bölüm ve aktif dönemini otomatik tanıyarak** sınav notu girildiğinde sınıf ortalaması ve final hedefleriyle Telegram'a bildirir; hafta içi her sabah **tam `08:00`'de** günün yemekhane menüsünü, Kuzeykent hava durumunu ve ders programını gönderir; Telegram'dan yazdığın `/yemek`, `/notlar`, `/devamsizlik`, `/hesapla` gibi komutlara da **saniyesinde** yanıt verir.
+
+> **Hızlı Geçiş:** [Ne İşe Yarar?](#-ne-i%CC%87%C5%9Fe-yarar) • [Örnek Mesajlar](#-telegramda-nas%C4%B1l-g%C3%B6r%C3%BCn%C3%BCr) • [Telegram Komutları](#-telegram-bot-komutlar%C4%B1-) • [5 Dakikada Kurulum (Render)](#-5-dakikada-%C3%BCcretsiz-kurulum-render--ad%C4%B1m-ad%C4%B1m) • [Özelleştirme](#%EF%B8%8F-i%CC%87ste%C4%9Fe-ba%C4%9Fl%C4%B1-%C3%B6zelle%C5%9Ftirmeler-environment-variables) • [Güvenlik](#-g%C3%BCvenlik-ve-gizlilik-%C5%9Fifrem-g%C3%BCvende-mi) • [Sorun Giderme](#-s%C4%B1k-sorulan-sorular-ve-sorun-giderme) • [Yerel / Docker / Geliştiriciler](#-yerel-bilgisayar--docker--manuel-actions-geli%C5%9Ftiriciler-i%CC%87%C3%A7in)
 
 ---
 
 ## ✨ Ne İşe Yarar?
 
 - 🔔 **Anlık Not Bildirimi (`ÜBYS`)**  
-  Vize, Final, Bütünleme, Kısa Sınav, Ödev, Geçme Notu veya Harf Notu (`HBN`) girildiği ya da güncellendiği anda sınıf ortalaması ve sıralamanla birlikte Telegram'a bildirim gelir.
+  Vize, Final, Bütünleme, Kısa Sınav, Ödev, Geçme Notu veya Harf Notu (`HBN`) girildiği ya da güncellendiği anda sınıf ortalaması ve sıralamanla birlikte Telegram'a bildirim gelir *(varsayılan olarak her 20 dakikada bir otomatik kontrol edilir)*.
 - 🎯 **Finalden Kaç Almalıyım? Hesaplayıcı**  
   Vize notun açıklandığında Kastamonu Üniversitesi resmi harf skalasına göre (`DC ≥55`, `CC ≥60`, `CB ≥65`, `BB ≥75`, `BA ≥85`, `AA ≥90`) her harf notu için finalden en az kaç alman gerektiğini otomatik hesaplar (`%30/%70`, `%40/%60` vb. dersin kendi oranına göre).
 - 📋 **Gün Bazlı Devamsızlık Takibi (`%70 Teorik / %80 Uygulama`)**  
-  ÜBYS Eğitim Kataloğu'ndan her dersinin gerçek **Teorik (`T`) + Uygulama (`U`) + Laboratuvar (`L`)** saatlerini otomatik çeker; **"4 gün hakkın var"** / **"Tam gün: 2 gün hakkın var"** şeklinde gün + saat olarak gösterir ve sınır azalınca uyarır.
+  ÜBYS Eğitim Kataloğu'ndan her dersinin gerçek **Teorik (`T`) + Uygulama (`U`) + Laboratuvar (`L`)** saatlerini otomatik çeker; *"4 gün hakkın var"* / *"Tam gün: 2 gün hakkın var"* şeklinde gün + saat olarak gösterir ve sınır azalınca uyarır.
 - 📊 **Tahmini Dönem YANO / GANO & Onur Belgesi Hesabı**  
   Dönem içi notların geldikçe tahmini dönem sonu ortalamanı (`YANO`), yeni genel ortalamanı (`GANO`), **Onur (`3.00+`) / Yüksek Onur (`3.50+`)** durumunu ve `DC/DD` koşullu geçme riskini (`GANO ≥ 2.00`) hesaplar.
-- 🗓️ **Günlük Ders Programı & Sınav Takvimi Hatırlatıcı**  
-  ÜBYS'deki ders programını çekip hafta içi her sabah *"Bugünkü derslerin ve saat/derslikleri"* mesajı atar; sınav haftasında tarih, saat ve salon bilgisiyle **7 / 3 / 1 / 0 gün kala** hatırlatma gönderir.
-- 📢 **Üniversite Geneli Otomatik Fakülte/MYO, Bölüm Sınav PDF ve Materyal Takibi**  
-  ÜBYS hesabından okuduğu **fakülte/MYO ve bölüm/sınıf adına göre** kendi biriminin web sayfasını otomatik algılar; `oidb.kastamonu.edu.tr`, `sks.kastamonu.edu.tr`, ÜBYS duyuruları, fakülte/bölüm sınav programı PDF/Excel linkleri ve ders içindeki yeni materyal/ödevleri tarayıp bildirir.
+- 🗓️ **Hafta İçi `08:00` Ders Programı & Sınav Takvimi Hatırlatıcı**  
+  Hafta sonları hariç hafta içi her sabah **tam `08:00` TR**'de *"Bugünkü derslerin ve saat/derslikleri"* mesajını atar; sınav haftasında tarih, saat ve salon bilgisiyle **7 / 3 / 1 / 0 gün kala** hatırlatma gönderir.
+- 📢 **Fakülte/MYO Duyuruları, Bölüm Sınav PDF'leri ve Ders Materyalleri**  
+  ÜBYS hesabından okuduğu **fakülte/MYO ve bölüm/sınıf adına göre** kendi biriminin web sayfasını otomatik algılar; `oidb.kastamonu.edu.tr`, `sks.kastamonu.edu.tr`, ÜBYS duyuruları, bölüm sınav programı PDF/Excel bağlantıları ve ders içine yüklenen yeni dosya/ödevleri bildirir.
 - 🍽️ **Günlük Yemekhane Menüsü + 🌤️ Kuzeykent Hava Durumu**  
-  Hafta içi her sabah `08:00`'de güncel yemek listesi ve kalorileriyle birlikte **Kastamonu / Kuzeykent Kampüsü** hava durumunu ve kıyafet tavsiyesini (ayaz, yağmur, kar, rüzgâr) tek mesajda gönderir.
-- 📅 **Akademik Takvim & 📆 Haftalık Öğrenci Özeti**  
-  Önemli akademik tarihler için **7 / 3 / 1 / 0 gün kala** hatırlatma + **Google Takvime Ekle** bağlantısı sunar; hafta sonu yaklaşan sınavlar, kritik devamsızlıklar ve takvim özetini tek brifingte toplar.
-- 💬 **Telegram'dan Komutla Sorgulama (`/yemek`, `/hesapla`, `/devamsizlik`...)**  
-  İstediğin zaman bota mesaj atıp menü, hava durumu, final hesabı, devamsızlık veya ders programı isteyebilirsin.
+  Hafta içi her sabah **`08:00`'de** güncel yemek listesi ve kalorileriyle birlikte **Kastamonu / Kuzeykent Kampüsü** hava durumunu ve kıyafet tavsiyesini (ayaz, yağmur, kar, rüzgâr) tek mesajda gönderir. *(Yemekhane kapalıysa hava durumunu bağımsız olarak iletir.)*
+- 📅 **Akademik Takvim Takibi**  
+  Önemli akademik tarihler için **7 / 3 / 1 / 0 gün kala** hatırlatma + **Google Takvime Ekle** bağlantısı sunar.
+- 💬 **7/24 Anlık Telegram Komutları (`/yemek`, `/hesapla`, `/notlar`...)**  
+  İstediğin an Telegram'dan bota mesaj atıp saniyesinde menü, hava durumu, final hesabı, devamsızlık, ders programı, sınav takvimi veya transkript isteyebilirsin.
 
 ---
 
@@ -84,7 +86,7 @@ Kastamonu Üniversitesi'nin **tüm fakülte, yüksekokul, meslek yüksekokulu (M
 
 ## 💬 Telegram Bot Komutları (`/`)
 
-Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(Render üzerinde `--serve` ile çalışırken **saniyesinde** anlık yanıt verir; bilgisayar/VPS üzerinde `--listen` ile de aynı anlık dinleyiciyi kullanabilirsin)*:
+Render üzerinde `--serve` kipinde çalışan bot, Telegram sohbetinden gönderdiğin aşağıdaki komutları **7/24 anında** yanıtlar:
 
 | Komut | Açıklama |
 | --- | --- |
@@ -106,141 +108,111 @@ Kendi botuna Telegram sohbetinden aşağıdaki komutları gönderebilirsin *(Ren
 
 ---
 
-## ☁️ Render ile 7/24 Ücretsiz Kurulum (Önerilen)
+## 🚀 5 Dakikada Ücretsiz Kurulum (Render — Adım Adım)
 
-GitHub Actions zamanlamaları yoğunlukta saatlerce gecikebildiği için otomatik çalışma **Render** (`--serve` kipi) üzerine taşınmıştır. Bu kipte:
-- 💬 Telegram `/` komutları (`getUpdates` long polling) **7/24 saniyesinde** yanıtlanır.
-- ⏰ Hafta içi her sabah **tam `08:00` TR** (Pazartesi–Cuma, hafta sonları hariç) yemekhane menüsü, kampüs hava durumu, günlük ders programı ve akademik takvim gönderilir.
-- 🔔 Gün boyu her `20` dakikada bir (`CHECK_INTERVAL_MINUTES`) yeni not, duyuru, materyal ve devamsızlık kontrolü yapılır.
-- 🩺 Dahili `/health` HTTP ucu sayesinde Render Web Service sağlık kontrolü ve ücretsiz keep-alive ping'leri desteklenir.
-
-1. Önce aşağıdaki **Adım 2** ve **Adım 3**'ü tamamlayarak `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GIST_ID` ve `GIST_TOKEN` bilgilerini hazırla.
-2. [Render Dashboard](https://dashboard.render.com/) üzerinden **New + → Blueprint** (veya **Web Service**) seçip bu GitHub deponu bağla. Depodaki [render.yaml](render.yaml) ayarları otomatik okunur:
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `python -m src.main --serve`
-   - **Health Check Path:** `/health`
-3. Render servisinin **Environment** sekmesine şu 6 değişkeni ekle:
-   - `UBYS_USERNAME`, `UBYS_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GIST_ID`, `GIST_TOKEN`
-4. **Önemli (Ücretsiz Planda Uyumayı Önleme):** Render Free Web Service 15 dakika HTTP trafiği almazsa uyku moduna geçer. Ücretsiz bir izleme servisinden (**UptimeRobot** veya **cron-job.org**) her **5–10 dakikada bir** `https://<servis-adin>.onrender.com/health` adresine `GET` veya `HEAD` isteği atacak şekilde monitör ekle. Böylece bot 7/24 uyanık kalır, `/` komutlarına anında yanıt verir ve hafta içi tam `08:00` TR'de sabah bildirimlerini atar.
-
----
-
-## 🚀 5 Dakikada Ücretsiz Kurulum (Adım Adım)
-
-Kod bilmene veya bilgisayarına bir şey kurmana gerek yok. Her şey tarayıcı üzerinden 5 basit adımda tamamlanır:
+Kod bilmene veya bilgisayarını açık bırakmana gerek yok. Kurulum tamamen tarayıcı üzerinden 5 adımda tamamlanır:
 
 ### Adım 1: Projeyi Kendi GitHub Hesabına Kopyala (`Fork`)
 1. GitHub hesabına giriş yap ve bu sayfanın sağ üstündeki **Fork** düğmesine tıkla → **Create fork**.
-2. **Önemli:** Kopyaladığın deponun görünürlüğünü **Public (Herkese Açık)** olarak bırak.
-   - *Neden?* GitHub, Public depolarda **Actions sürelerini ücretsiz ve sınırsız** verir (`Private` depolarda aylık kota dolar).
-   - *Merak etme:* Senin şifrelerin ve notların kesinlikle repoda durmaz; hepsi Adım 3 ve Adım 4'teki şifreli/gizli alanlarda saklanır.
+2. Depo görünürlüğünü ister **Public**, ister **Private** yapabilirsin *(şifrelerin ve not geçmişin kesinlikle repoda tutulmaz)*.
 
 ### Adım 2: Kendi Telegram Botunu Oluştur (`TELEGRAM_BOT_TOKEN` & `TELEGRAM_CHAT_ID`)
-1. Telegram'da aramaya **`@BotFather`** yaz (yanında mavi tik olan resmi botu aç).
-2. `/newbot` komutunu gönder.
-   - Senden botuna bir isim (örn: `Benim UBYS Botum`) ve sonunda `bot` geçen bir kullanıcı adı (örn: `ahmet_ubys_bot`) isteyecek.
-   - İşlem bitince sana `123456789:ABCdef...` şeklinde bir **Token** verecek. Bunu bir yere not al (`TELEGRAM_BOT_TOKEN`).
-3. BotFather'ın verdiği `t.me/...` linkinden kendi oluşturduğun bota gir ve mutlaka alttaki **Başlat (`/start`)** butonuna bas. *(Bunu yapmazsan bot sana mesaj atamaz!)*
-4. Şimdi kendi Telegram ID'ni öğrenmek için Telegram'da **`@userinfobot`** (veya `@RawDataBot`) botunu aç ve **Başlat**'a bas. Sana verdiği sayı (`Id`, örn: `987654321`) senin **`TELEGRAM_CHAT_ID`** değerindir.
+1. Telegram'da aramaya **`@BotFather`** yaz (mavi tikli resmi botu aç) ve `/newbot` komutunu gönder.
+   - Botuna bir isim (örn: `Benim UBYS Botum`) ve sonunda `bot` geçen bir kullanıcı adı (örn: `ahmet_ubys_bot`) ver.
+   - Sana `123456789:ABCdef...` şeklinde bir **Token** verecek. Bunu kaydet (`TELEGRAM_BOT_TOKEN`).
+2. BotFather'ın verdiği `t.me/...` linkinden kendi botuna gir ve mutlaka alttaki **Başlat (`/start`)** butonuna bas. *(Bunu yapmazsan bot sana mesaj atamaz.)*
+3. Kendi sayısal Telegram ID'ni öğrenmek için **`@userinfobot`** (veya `@RawDataBot`) botunu açıp **Başlat**'a bas. Verdiği sayı senin **`TELEGRAM_CHAT_ID`** değerindir.
 
 ### Adım 3: Notların Saklanacağı Gizli Alanı Oluştur (`GIST_ID` & `GIST_TOKEN`)
-Depo herkese açık (`Public`) olduğu için bot, senin not geçmişini kodların içine değil; yalnızca senin erişebildiğin gizli bir **Secret Gist** not defterine kaydeder.
+Sunucu yeniden başlatıldığında veya güncellendiğinde not geçmişin kaybolmasın diye bot, verilerini yalnızca senin erişebildiğin gizli bir **Secret Gist** dosyasına kaydeder:
 
 1. **`GIST_ID` oluşturma:**
    - [https://gist.github.com](https://gist.github.com) adresine git.
    - **Filename including extension** kutusuna tam olarak şunu yaz: `grades_state.json`
-   - Altındaki büyük içerik kutusuna sadece iki süslü parantez yaz: `{}`
-   - Sağ alttaki yeşil düğmenin yanındaki oka basıp **Create secret gist** seçeneğiyle oluştur (`Create public gist` değil, mutlaka **secret** seç!).
-   - Açılan sayfanın tarayıcı adres çubuğundaki son uzun kod senin **`GIST_ID`** değerindir (`https://gist.github.com/kullaniciadin/` kısmından sonraki **uzun harf/rakam dizisi**).
+   - Altındaki içerik kutusuna sadece iki süslü parantez yaz: `{}`
+   - Sağ alttaki oka basıp **Create secret gist** seç (`Create public gist` değil, mutlaka **secret** olmalı).
+   - Açılan sayfanın adres çubuğundaki sondaki uzun kod senin **`GIST_ID`** değerindir.
 2. **`GIST_TOKEN` oluşturma:**
    - [GitHub Tokens (Classic)](https://github.com/settings/tokens/new) sayfasını aç.
-   - **Note** kısmına `UBYS Gist` gibi bir ad ver, **Expiration** için uygun bir süre seç (örneğin `No expiration` veya `1 year`).
-   - Aşağıdaki izin kutularından **yalnızca `gist`** kutucuğunu işaretle (başka hiçbir kutucuğu işaretleme).
-   - En alttaki **Generate token** düğmesine bas ve çıkan `ghp_...` kodunu kopyala (sayfadan çıkınca bir daha görünmez). Bu senin **`GIST_TOKEN`** değerindir.
+   - **Note** kısmına `UBYS Gist` yaz, **Expiration** süresini seç (örn. `No expiration` veya `1 year`).
+   - İzinlerden **yalnızca `gist`** kutucuğunu işaretle.
+   - **Generate token** düğmesine bas ve çıkan `ghp_...` kodunu kopyala (`GIST_TOKEN`).
 
-### Adım 4: Bilgileri GitHub'a Güvenli Şekilde Ekle (`Secrets`)
-Kendi `Fork`ladığın deponun sayfasına dön:
-**Settings → Secrets and variables → Actions → Repository secrets → New repository secret** yolunu izle ve aşağıdaki **6 sırrı** tek tek ekle:
+### Adım 4: Botu Render Üzerinde Yayına Al
+1. [Render Dashboard](https://dashboard.render.com/) hesabına GitHub ile giriş yap.
+2. **New + → Web Service** (veya Blueprint için [render.yaml](render.yaml)) seçip `Fork`ladığın `Kastamonu_UBYS_Bot` reposunu bağla ve şu alanları kontrol et:
+   - **Language:** `Docker` *(depodaki [Dockerfile](Dockerfile) otomatik olarak `python -m src.main --serve` çalıştırır)*
+   - **Branch:** `main`
+   - **Region:** `Frankfurt (EU Central)`
+   - **Instance Type:** `Free ($0 / month)`
+   - **Health Check Path:** `/health`
+3. **Environment Variables** bölümüne aşağıdaki değişkenleri ekle:
 
-| Secret Adı | İçine Ne Yazacaksın? | Eski/Alternatif İsim |
+| Key | Value (Ne Yazacaksın?) | Zorunlu mu? |
 | --- | --- | --- |
-| `UBYS_USERNAME` | ÜBYS kullanıcı adın (genellikle **öğrenci numaran**) | `OGRENCI_NO` |
-| `UBYS_PASSWORD` | ÜBYS giriş şifren | `SIFRE` |
-| `TELEGRAM_BOT_TOKEN` | Adım 2'de `@BotFather`'dan aldığın Bot Token | `BOT_TOKEN` |
-| `TELEGRAM_CHAT_ID` | Adım 2'de öğrendiğin Telegram ID numaran *(birden çok hesap için virgülle ayırabilirsin)* | `CHAT_ID` |
-| `GIST_ID` | Adım 3'te oluşturduğun Secret Gist'in ID kodu | — |
-| `GIST_TOKEN` | Adım 3'te aldığın sadece `gist` yetkili `ghp_...` token | — |
+| `UBYS_USERNAME` | ÜBYS kullanıcı adın (genellikle **öğrenci numaran**) | ✅ Evet |
+| `UBYS_PASSWORD` | ÜBYS giriş şifren | ✅ Evet |
+| `TELEGRAM_BOT_TOKEN` | Adım 2'de `@BotFather`'dan aldığın Bot Token | ✅ Evet |
+| `TELEGRAM_CHAT_ID` | Adım 2'de öğrendiğin Telegram ID *(çoklu hesap için virgülle ayır)* | ✅ Evet |
+| `GIST_ID` | Adım 3'te oluşturduğun Secret Gist ID'si | ✅ Evet |
+| `GIST_TOKEN` | Adım 3'te aldığın `gist` yetkili `ghp_...` token | ✅ Evet |
+| `ENABLE_WEEKLY_BRIEFING` | `false` *(yalnızca hafta içi `08:00` istiyorsan ekle; Pazar özeti de istersen `true` bırak)* | İsteğe bağlı |
 
+4. **Deploy Web Service** butonuna bas. 1–2 dakika içinde servis **Live** olacak ve Telegram'a ilk başlangıç mesajın gelecektir.
 
-### Adım 5: Botu Aç ve İlk Testi Yap!
-1. Deponun üst menüsünden **Actions** sekmesine tıkla.
-2. *"Workflows aren't being run on this forked repository"* yazısı çıkarsa yeşil **`I understand my workflows, go ahead and enable them`** butonuna tıkla.
-3. Sol menüden **Kastamonu ÜBYS Swiss Bot**'u seç.
-4. Sağ taraftaki **Run workflow** açılır menüsüne tıkla:
-   - **Çalıştırma kipi (`mode`):** `test_all` seç
-   - **`Telegram'a test bildirimi gönder` (`test_notify`)** kutusunu işaretle ✅
-   - Yeşil **Run workflow** düğmesine bas.
-5. Yaklaşık **1 dakika** içinde Telegram'a ders notların, gün bazlı devamsızlık hakların, transkript özetin, günün yemek listesi ve yaklaşan akademik takvim etkinliklerin gelecektir! 🎉
+### Adım 5: Botu 7/24 Uyanık Tut (UptimeRobot Ping)
+Render'ın ücretsiz planında bir web servisi **15 dakika boyunca dışarıdan HTTP isteği almazsa uyku moduna geçer**. Bot uyuduğunda sabah `08:00`'de uyanamaz ve `/` komutlarına anlık cevap veremez.
 
-> **Not:** GitHub Actions üzerindeki otomatik `schedule` tetikleyicisi Render ile çakışmaması ve gecikme yaşamaması için kaldırılmıştır; Actions sekmesi artık yalnızca aşağıdaki **Run workflow** düğmesiyle tek seferlik manuel test/kontrol için kullanılır.
+Bunu önlemek için ücretsiz bir izleme servisine botunun `/health` adresini veriyoruz; o servis senin yerine 5 dakikada bir *"ayakta mısın?"* diye yoklama atarak botu uyanık tutar *(Render Free aylık 750 ücretsiz saat verdiği için tek bir servis ay boyunca hiç uyumadan %100 ücretsiz çalışır)*:
 
----
+1. Render servisinin üstünde görünen adresin sonuna `/health` ekleyip tarayıcıda aç:  
+   `https://<servis-adin>.onrender.com/health`  
+   Ekranda `{"status": "ok", ...}` görüyorsan tamamdır.
+2. [uptimerobot.com](https://uptimerobot.com) (veya [cron-job.org](https://cron-job.org)) üzerinde ücretsiz hesap aç.
+3. **+ Add New Monitor** deyip şu 4 alanı doldur ve kaydet:
+   - **Monitor Type:** `HTTP(s)`
+   - **Friendly Name:** `UBYS Bot`
+   - **URL:** `https://<servis-adin>.onrender.com/health`
+   - **Monitoring Interval:** `5 minutes`
 
-## 🕹️ İstediğin Zaman Tek Tıkla Çalıştırma (`Run workflow`)
-
-**Actions → Kastamonu ÜBYS Swiss Bot → Run workflow** menüsünden zamanlanmış saati beklemeden istediğin modülü tek tıkla çalıştırabilirsin:
-
-| Kip (`mode`) | Ne Yapar? |
-| --- | --- |
-| `once` | Normal tam kontrolü şimdi çalıştırır (`test_notify` işaretliyse durum dosyasını bozmadan Telegram'a test özeti atar). |
-| `test_all` | Kayıtlı not durumunu değiştirmeden tüm modülleri dener. |
-| `attendance` | Aktif dönem derslerinin **gün bazlı devamsızlık haklarını** gösterir. |
-| `transcript` | ÜBYS **transkriptini ve GANO / YANO** özetini çeker. |
-| `gpa` | Tahmini dönem sonu **YANO / GANO & Onur Belgesi** durumunu hesaplar. |
-| `schedule` | ÜBYS **haftalık ders programını** çeker. |
-| `exams` | ÜBYS **vize/final sınav takvimini** ve salonları çeker. |
-| `announcements` | OİDB, SKS ve okul **güncel duyurularını** listeler. |
-| `weather` | **Kuzeykent kampüsü 3 günlük hava durumunu** gösterir. |
-| `dining` | **Günün veya yaklaşan yemekhane menüsünü** (+ hava durumunu) gösterir. |
-| `calendar` | **Akademik takvimde** devam eden ve yaklaşan tarihleri özetler. |
-| `briefing` | **Haftalık toplu öğrenci özet brifingini** üretir. |
-| `commands` | Telegram'da bota yazdığın bekleyen `/` komutlarını hemen yanıtlar. |
-| `force_daily` | Günlük yemekhane, takvim, ders programı ve brifingi saat/tekrar sınırını aşarak zorla gönderir. |
-
-*(İstediğin kipi Telegram'a da göndermek için `Telegram'a test bildirimi gönder` kutusunu işaretlemen yeterli.)*
+Artık bilgisayarın kapalı olsa bile bot 7/24 aktif kalır; hafta içi her sabah **tam `08:00` TR**'de günlük özetini atar, gün içi not/duyuru geldiğinde bildirir ve `/` komutlarına saniyesinde yanıt verir.
 
 ---
 
-## ⚙️ İsteğe Bağlı Özelleştirmeler (`Variables`)
+## ⚙️ İsteğe Bağlı Özelleştirmeler (`Environment Variables`)
 
-Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversitesi kurallarıyla otomatik çalıştırır. Değiştirmek istediklerini **Settings → Secrets and variables → Actions → Variables → New repository variable** yolundan ekleyebilirsin:
+Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversitesi kurallarıyla otomatik çalıştırır. Değiştirmek istediklerini Render'daki servisinin **Environment** sekmesine ekleyebilirsin:
 
 - **Kendi fakültenin veya MYO'nun duyurularını da eklemek için:**  
-  Bot, ÜBYS hesabından okuduğu fakülte/MYO adına göre kendi biriminin sayfasını, OİDB, SKS ve ÜBYS duyurularını **otomatik olarak** tarar. Ekstra farklı bir sayfa eklemek istersen `ANNOUNCEMENT_URLS` değişkeni ekleyebilirsin:
+  Bot, ÜBYS hesabından okuduğu fakülte/MYO adına göre kendi biriminin sayfasını, OİDB, SKS ve ÜBYS duyurularını **otomatik olarak** tarar. Ekstra farklı bir sayfa eklemek istersen `ANNOUNCEMENT_URLS` ekleyebilirsin:
   ```text
   MMF|https://mmf.kastamonu.edu.tr/
   ```
 - **Bazı derslerin vize/final oranı farklıysa (örn. `%30/%70`):**  
-  Bot dersin oranını ÜBYS ve Eğitim Kataloğu'ndan otomatik okur (tüm fakülte ve bölümlerle uyumlu). Hoca derste farklı bir oran açıkladıysa `COURSE_WEIGHTS` değişkeni ekleyip tüm kaynakların önüne geçirebilirsin:
+  Bot dersin oranını ÜBYS ve Eğitim Kataloğu'ndan otomatik okur. Hoca farklı bir oran uyguluyorsa `COURSE_WEIGHTS` ile öncelik verebilirsin:
   ```text
   KOD101:30/70, KOD202:40/60
   ```
 - **Fakültene özel akademik takvim görmek için:**  
-  `CALENDAR_FACULTY` değişkenine `GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU` veya `TURIZM` (ya da kendi birim adını) yazabilirsin.
+  `CALENDAR_FACULTY` değişkenine `GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU` veya `TURIZM` yazabilirsin.
 - **İstemediğin bir özelliği kapatmak için:**  
-  Örneğin yemekhane, hava durumu veya duyuru bildirimini istemiyorsan `ENABLE_DINING`, `ENABLE_WEATHER` veya `ENABLE_ANNOUNCEMENTS` değerini `false` yapman yeterlidir.
+  Örneğin yemekhane, hava durumu veya duyuru bildirimini kapatmak için `ENABLE_DINING`, `ENABLE_WEATHER` veya `ENABLE_ANNOUNCEMENTS` değerini `false` yapman yeterlidir.
 
 <details>
 <summary>📋 Tüm İsteğe Bağlı Ayarlar (Tam Liste)</summary>
 
 | Variable Adı | Varsayılan | Açıklama |
 | --- | --- | --- |
+| `CHECK_INTERVAL_MINUTES` | `20` | `--serve` ve `--loop` kiplerinde arka plan ÜBYS kontrol aralığı (dakika) |
 | `ENABLE_GRADES` | `true` | ÜBYS not takibini açar/kapatır |
 | `ENABLE_DINING` | `true` | Hafta içi yemekhane menüsü bildirimini açar/kapatır |
-| `ENABLE_WEATHER` | `true` | Sabah menüsü ve brifinge Kuzeykent hava durumunu ekler |
+| `ENABLE_WEATHER` | `true` | Sabah menüsüne (veya yemekhane kapalıysa tek başına) Kuzeykent hava durumunu ekler |
 | `WEATHER_LOCATION` | `Kastamonu (Kuzeykent)` | Hava durumu başlığında görünecek konum adı |
 | `WEATHER_LAT` / `WEATHER_LON` | `41.4307` / `33.7764` | Hava durumu koordinatları (Kuzeykent Kampüsü) |
 | `ENABLE_CALENDAR` | `true` | Akademik takvim hatırlatma ve Pazartesi özetini açar/kapatır |
+| `CALENDAR_NOTIFY_HOUR` | `8` | Akademik takvim kontrol saati (`0-23`, TR saati) |
+| `CALENDAR_LOOKAHEAD_DAYS` | `30` | Haftalık özetlerde kaç gün ileriye bakılacağı |
+| `CALENDAR_WEEKLY_SUMMARY` | `true` | Pazartesi günleri devam eden & yaklaşan takvim özeti gönderir |
 | `ENABLE_ATTENDANCE` | `true` | Devamsızlık hakkı ve kritik eşik takibini açar/kapatır |
 | `ENABLE_TRANSCRIPT` | `true` | GANO değişimi ve transkript takibini açar/kapatır |
 | `ENABLE_ANNOUNCEMENTS` | `true` | OİDB, SKS, ÜBYS ve fakülte duyurularını tarar |
@@ -251,8 +223,8 @@ Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversit
 | `SCHEDULE_NOTIFY_HOUR` | `8` | Sabah ders programı bildirimi saati (`0-23`, TR saati) |
 | `EXAM_REMINDER_DAYS` | `7,3,1,0` | Sınavdan kaç gün önce hatırlatma gönderileceği |
 | `ENABLE_MATERIALS` | `true` | Ders içine yüklenen yeni PDF/ödev/duyuruları bildirir |
-| `ENABLE_WEEKLY_BRIEFING` | `true` | Pazar günleri haftalık toplu öğrenci brifingi gönderir |
-| `WEEKLY_BRIEFING_HOUR` | `20` | Pazar haftalık brifing en erken saati (zamanlanmış `20:23` çalışması ve Pazartesi sabaha karşı telafi dahil, TR saati) |
+| `ENABLE_WEEKLY_BRIEFING` | `true` | Pazar akşamları haftalık toplu öğrenci brifingi gönderir (`false` ile kapatılabilir) |
+| `WEEKLY_BRIEFING_HOUR` | `20` | Pazar haftalık brifing en erken saati (TR saati) |
 | `ENABLE_COMMANDS` | `true` | Telegram'dan gelen `/` komutlarını yanıtlar |
 | `ENABLE_CATALOG` | `true` | ÜBYS Eğitim Kataloğu'ndan derslerin gerçek `T+U+L` saatlerini ve değerlendirme oranlarını otomatik çeker (`14` gün Gist önbellekli) |
 | `UBYS_PROGRAM` | *(otomatik)* | Eğitim Kataloğu bölüm eşleşmesi için bölüm adı veya ID sabitlemesi |
@@ -264,10 +236,11 @@ Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversit
 | `THEORY_MIN_ATTENDANCE` | `70` | Teorik ders devam zorunluluğu (`%70`) |
 | `PRACTICE_MIN_ATTENDANCE` | `80` | Uygulamalı ders devam zorunluluğu (`%80`) |
 | `COURSE_HOURS` | *(boş)* | Ders bazlı özel haftalık `T+U` saati (`KOD101:3+1,KOD202:4+0`) |
-| `CALENDAR_FACULTY` | `GENEL` | Takvim birimi (`GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU`, `TURIZM` — `BOLUM_TIPI` de desteklenir) |
+| `CALENDAR_FACULTY` | `GENEL` | Takvim birimi (`GENEL`, `TIP`, `VET`, `DIS`, `LISANSUSTU`, `TURIZM`) |
 | `CALENDAR_CATEGORIES` | `STUDENT` | Takvim filtresi (`STUDENT`, `ALL` veya virgüllü kategori listesi) |
 | `CALENDAR_REMINDER_DAYS` | `7,3,1,0` | Etkinlik başlamadan kaç gün önce tek seferlik hatırlatma atılacağı |
-| `DINING_NOTIFY_HOUR` | `8` | Yemekhane bildiriminin gönderileceği en erken saat (Türkiye saati, `0-23`) |
+| `DINING_NOTIFY_HOUR` | `8` | Yemekhane ve hava durumu bildiriminin gönderileceği saat (Türkiye saati, `0-23`) |
+| `DINING_SHEET_URL` | *(otomatik)* | SKS yerine doğrudan Google Sheets CSV/edit bağlantısı |
 | `ALL_SEMESTERS` | `false` | `true` yapılırsa geçmiş dönem derslerini de tarar |
 | `UBYS_USER_GROUP_ID` | *(otomatik)* | Birden fazla ÜBYS rolü olan kullanıcılar için öğrenci rolü ID'si |
 | `NOTIFY_ON_FIRST_RUN` | `true` | İlk kurulumda mevcut ders özetini Telegram'a gönderir |
@@ -278,9 +251,9 @@ Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversit
 
 ## 🔒 Güvenlik ve Gizlilik (Şifrem Güvende mi?)
 
-- **Şifrelerin Şifrelenmiş Tutulur:** `UBYS_USERNAME`, `UBYS_PASSWORD`, `TELEGRAM_BOT_TOKEN` gibi tüm bilgiler **GitHub Secrets** içinde şifreli saklanır; GitHub Actions günlüklerinde bile otomatik olarak `***` şeklinde gizlenir ve hiçbir zaman kod dosyalarına yazılmaz.
-- **Notların Açık Repoya Yazılmaz:** Not geçmişin, GANO'n ve katalog önbelleğin senin **Secret Gist** (`GIST_ID`) dosyanda tutulur; açık (`Public`) repoya hiçbir kişisel veri gönderilmez.
-- **Üçüncü Taraf Sunucu Yoktur:** Bot tamamen **senin kendi GitHub hesabında** çalışır ve yalnızca resmi `*.kastamonu.edu.tr`, `api.open-meteo.com`, `api.telegram.org` ve `api.github.com` adresleriyle haberleşir.
+- **Bilgilerin Şifreli Saklanır:** `UBYS_USERNAME`, `UBYS_PASSWORD`, `TELEGRAM_BOT_TOKEN` ve `GIST_TOKEN` yalnızca senin Render servisinin **Environment Variables** alanında saklanır; kaynak kodda veya `/health` yanıtında kesinlikle yer almaz.
+- **Notların Açık Repoya Yazılmaz:** Not geçmişin, GANO'n ve katalog önbelleğin senin **Secret Gist** (`GIST_ID`) dosyanda tutulur.
+- **Üçüncü Taraf Veri Toplama Yoktur:** Bot yalnızca resmi `*.kastamonu.edu.tr`, `api.open-meteo.com` / `wttr.in`, `api.telegram.org` ve `api.github.com` adresleriyle doğrudan haberleşir.
 - **Açık Kaynak:** Tüm Python kodları bu depoda şeffaf şekilde incelenebilir.
 
 ---
@@ -291,26 +264,29 @@ Hiçbir ek ayar yapmazsan bot tüm özellikleri varsayılan Kastamonu Üniversit
   1. Kendi oluşturduğun bota Telegram'da girip **`/start`** (Başlat) butonuna bastığından emin ol.  
   2. `TELEGRAM_CHAT_ID` içinde kendi sayısal ID'nin (`@userinfobot` çıktısı) doğru yazıldığını ve başında/sonunda boşluk olmadığını kontrol et.
 
+- **Sabah `08:00` mesajı gelmedi veya `/` komutları gecikiyor:**  
+  Render Free servisi 15 dakika istek almazsa uyur. **Adım 5**'teki gibi UptimeRobot üzerinden `https://<servis-adin>.onrender.com/health` adresine **5 dakikalık** ping tanımladığından ve Render hesabındaki toplam Free saat kotasının (aylık 750 saat) dolmadığından emin ol.
+
+- **Render loglarında `Telegram getUpdates çakışması (HTTP 409)` gördüm:**  
+  Yeni bir kod yüklemesi (deploy) sırasında eski ve yeni container aynı anda birkaç saniye açık kalırsa Telegram geçici 409 döndürür; bot bunu otomatik algılayıp 5 saniye bekler ve eski container kapanınca normale döner. Aynı bot token'ını başka bir yerde (`GitHub Actions --commands` veya yerel `--listen`) aynı anda çalıştırmadığından emin ol.
+
 - **`GitHub Gist / Durum Okuma Hatası (HTTP 401)` uyarısı aldım:**  
-  `GIST_TOKEN` süren dolmuş veya token oluşturulurken **`gist`** kutucuğu işaretlenmemiş demektir. [GitHub Tokens](https://github.com/settings/tokens/new) sayfasından sadece `gist` yetkili yeni bir token üretip **Settings → Secrets → `GIST_TOKEN`** değerini güncellemen yeterlidir (not geçmişin silinmez).
+  `GIST_TOKEN` süren dolmuş veya token oluşturulurken **`gist`** kutucuğu işaretlenmemiş demektir. [GitHub Tokens](https://github.com/settings/tokens/new) sayfasından sadece `gist` yetkili yeni bir token üretip Render'da `GIST_TOKEN` değerini güncellemen yeterlidir (not geçmişin silinmez).
 
 - **ÜBYS şifremi değiştirdim, bot hata vermeye başladı:**  
-  **Settings → Secrets → `UBYS_PASSWORD`** değerini yeni şifrenle güncelle; bot bir sonraki çalıştırmada kaldığı yerden devam eder. *(Güvenlik nedeniyle şifre hatalıysa tekrar kilitlenmemek için hata uyarısı yalnızca 1 kez atılır.)*
-
-- **GitHub'dan "60 gün boyunca depoda değişiklik yapılmadığı için zamanlanmış çalışma durdurulacak" e-postası geldi:**  
-  GitHub kuralı gereği bir depoya 60 gün boyunca commit atılmazsa otomatik cron çalışması duraklatılır. **Actions** sekmesine girip **Enable workflow**'a tıklaman veya depoda küçük bir düzenleme yapman 2 aylığına yeniden aktif eder.
+  Render → **Environment** içinden `UBYS_PASSWORD` değerini yeni şifrenle güncelle ve servisi yeniden başlat; bot kaldığı yerden devam eder. *(Güvenlik nedeniyle şifre hatalıysa tekrar kilitlenmemek için hata uyarısı yalnızca 1 kez atılır.)*
 
 - **Bir dersimin vize/final oranı veya teorik/uygulama saati hocanın söylediğiyle uyuşmuyor:**  
-  Hocalar dönem içinde Eğitim Kataloğu'ndan farklı oran/saat uygulayabiliyor. **Settings → Variables** içine `COURSE_WEIGHTS` (örn. `KOD101:30/70`) veya `COURSE_HOURS` (örn. `KOD101:3+1`) ekleyerek o dersi hemen düzeltebilirsin.
+  Render → **Environment** içine `COURSE_WEIGHTS` (örn. `KOD101:30/70`) veya `COURSE_HOURS` (örn. `KOD101:3+1`) ekleyerek o dersi hemen düzeltebilirsin.
 
 ---
 
-## 💻 Kendi Bilgisayarında / Docker ile Çalıştırma (Geliştiriciler İçin)
+## 💻 Yerel Bilgisayar / Docker / Manuel Actions (Geliştiriciler İçin)
 
 <details>
-<summary>🛠️ Yerel Kurulum, CLI Komutları, Testler ve Docker</summary>
+<summary>🛠️ Yerel Kurulum, CLI Komutları, Testler, Docker ve Manuel GitHub Actions</summary>
 
-### Kurulum
+### Yerel Kurulum
 
 ```bash
 python -m venv .venv
@@ -327,6 +303,8 @@ copy .env.example .env   # Linux/macOS: cp .env.example .env
 
 | Komut | Açıklama |
 | --- | --- |
+| `python -m src.main --serve` | Render/bulut için 7/24 zamanlayıcı + anlık Telegram komutları + `/health` sunucusu başlatır |
+| `python -m src.main --serve --port 8080` | `--serve` kipini özel bir HTTP portuyla başlatır |
 | `python -m src.main --calc 100` | Vize notuna göre final hedeflerini çevrimdışı hesaplar |
 | `python -m src.main --calc 100 --weights 30/70` | Özel vize/final oranıyla (`%30/%70` vb.) final hedeflerini hesaplar |
 | `python -m src.main --attendance` | Aktif dönem derslerinin gün/saat devamsızlık raporunu gösterir |
@@ -341,7 +319,6 @@ copy .env.example .env   # Linux/macOS: cp .env.example .env
 | `python -m src.main --briefing` | Haftalık toplu öğrenci brifingini oluşturur |
 | `python -m src.main --commands` | Telegram'da bekleyen `/` komutlarını tek seferde yanıtlar |
 | `python -m src.main --listen` | Telegram komutları için anlık sürekli dinleyici (`long polling`) başlatır |
-| `python -m src.main --serve` | Render/bulut için 7/24 zamanlayıcı + anlık Telegram komutları + `/health` sunucusu başlatır |
 | `python -m src.main --test` | Etkin tüm modülleri durum dosyasını bozmadan test eder (`--notify-test` ile Telegram'a atar) |
 | `python -m src.main --once` | Tek seferlik tam kontrol + durum kaydı yapar |
 | `python -m src.main --loop` | Belirlenen aralıklarla (`CHECK_INTERVAL_MINUTES`) sürekli çalışır |
@@ -357,6 +334,10 @@ docker compose up -d --build
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+### İsteğe Bağlı Manuel GitHub Actions (`Run workflow`)
+
+Depodaki `.github/workflows/check-grades.yml` iş akışı yalnızca **Actions → Kastamonu ÜBYS Swiss Bot → Run workflow** üzerinden tek seferlik manuel test/önizleme için tutulur (`test_all`, `dining`, `calendar`, `transcript`, `attendance`, `gpa`, `schedule`, `exams`, `announcements`, `weather`, `briefing`, `force_daily`). Otomatik zamanlanmış çalışma Render üzerinden yapılır.
 
 </details>
 
